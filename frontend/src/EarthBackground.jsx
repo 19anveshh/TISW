@@ -131,25 +131,26 @@ export default function EarthBackground({
   }, []);
 
   return (
-    <div className="fixed inset-0 z-0 pointer-events-none overflow-hidden select-none">
+    <div className="earth-bg-root">
       {/* Canvas rendering sequential Earth frames */}
       <canvas
         ref={canvasRef}
-        className="absolute inset-0 w-full h-full object-cover transition-opacity duration-1000"
+        className="earth-bg-canvas"
       />
 
       {/* Atmospheric space vignette overlay for high contrast text readability */}
       <div
-        className="absolute inset-0"
+        className="earth-bg-overlay"
         style={{
           background: `radial-gradient(circle at 50% 45%, rgba(18, 14, 28, ${overlayOpacity * 0.5}) 0%, rgba(10, 8, 18, ${overlayOpacity * 1.5}) 100%)`,
-          backdropFilter: 'blur(1.5px)'
+          backdropFilter: 'blur(1.5px)',
+          WebkitBackdropFilter: 'blur(1.5px)',
         }}
       />
 
       {/* Glowing cosmic violet / lavender atmospheric nebula glow */}
       <div
-        className="absolute left-1/2 top-[48%] -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] sm:w-[820px] sm:h-[820px] rounded-full pointer-events-none"
+        className="earth-bg-glow"
         style={{
           background:
             'radial-gradient(circle, rgba(168, 85, 247, 0.32) 0%, rgba(192, 132, 252, 0.18) 40%, rgba(15, 12, 25, 0) 72%)',
@@ -160,14 +161,14 @@ export default function EarthBackground({
 
       {/* Ambient specular corner light accents */}
       <div
-        className="absolute top-0 right-0 w-[450px] h-[450px] rounded-full pointer-events-none"
+        className="earth-bg-accent-tr"
         style={{
           background: 'radial-gradient(circle, rgba(147, 51, 234, 0.18) 0%, transparent 65%)',
           filter: 'blur(50px)'
         }}
       />
       <div
-        className="absolute bottom-0 left-0 w-[500px] h-[500px] rounded-full pointer-events-none"
+        className="earth-bg-accent-bl"
         style={{
           background: 'radial-gradient(circle, rgba(192, 132, 252, 0.14) 0%, transparent 65%)',
           filter: 'blur(60px)'

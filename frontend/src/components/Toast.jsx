@@ -8,10 +8,10 @@ export default function Toast({ message, type = 'info' }) {
   if (!message) return null;
 
   const typeStyles = {
-    info: 'bg-white/80 text-slate-800 border-white/90',
-    error: 'bg-red-50/90 text-red-800 border-red-200/80',
-    success: 'bg-emerald-50/90 text-emerald-800 border-emerald-200/80',
-    warning: 'bg-amber-50/90 text-amber-800 border-amber-200/80',
+    info: 'toast-pill--info',
+    error: 'toast-pill--error',
+    success: 'toast-pill--success',
+    warning: 'toast-pill--warning',
   };
 
   const iconMap = {

@@ -1,5 +1,5 @@
 """
-server.py - FastAPI Backend for StudyFlow AI (Personalized AI Study Tutor).
+server.py - FastAPI Backend for TISW (Teaching in a Structured Way).
 
 Integrates the LangGraph tutor workflow from main.py and exposes:
   POST /api/chat    - Invoke tutor_app workflow and return { "response": tutor_reply, "thread_id": thread_id }
@@ -43,7 +43,7 @@ if tutor_app is None:
 # APP INITIALIZATION & CORS CONFIGURATION
 # =====================================================================
 
-app = FastAPI(title="StudyFlow AI Study Tutor Backend", version="2.0.0")
+app = FastAPI(title="TISW AI Study Tutor Backend", version="2.0.0")
 
 # Enable CORS middleware so the Vite/React dev server can communicate seamlessly
 app.add_middleware(
@@ -196,7 +196,7 @@ async def upload_document(file: UploadFile = File(...)):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
-    print(f"\n[SERVER] 🚀 StudyFlow AI Backend -> http://localhost:{port}")
+    print(f"\n[SERVER] 🚀 TISW Backend -> http://localhost:{port}")
     print(f"[SERVER] 💬 Chat Endpoint: POST /api/chat")
     print(f"[SERVER] 🔄 Reset Session:  POST /api/reset")
     print(f"[SERVER] 💚 Health Check:   GET  /api/health\n")

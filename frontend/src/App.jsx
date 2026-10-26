@@ -1,24 +1,22 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Sparkles, Search, Bell, Paperclip, Globe, RefreshCw, Send, Zap,
-  Lightbulb, Wand2, Box, Plus, X, Volume2, BookOpen, Layers
+  Layers, Plus, X, Send, Paperclip, RefreshCw, BookOpen
 } from './icons';
 import EarthBackground from './EarthBackground';
 import MarkdownRenderer from './components/MarkdownRenderer';
-import QuickActionChips from './components/QuickActionChips';
 import FileDropZone from './components/FileDropZone';
 import Toast from './components/Toast';
 import { sendChatMessage, checkHealth } from './lib/api';
 
 // ============================================================================
-// MAIN APPLICATION — StudyFlow AI (Personalized AI Study Tutor)
+// TISW — Teaching in a Structured Way
+// Minimal, transparent AI tutoring workspace
 // ============================================================================
 export default function App() {
-  // --- Core state ---
+  // --- Core conversation state ---
   const [messages, setMessages] = useState([]);
   const [prompt, setPrompt] = useState('');
   const [threadId, setThreadId] = useState(() => `study-session-${crypto.randomUUID().slice(0, 8)}`);
-  const [mode, setMode] = useState('default');
   const [isLoading, setIsLoading] = useState(false);
 
   // --- UI state ---
@@ -43,7 +41,7 @@ export default function App() {
   const triggerToast = useCallback((msg, type = 'info') => {
     setToast(msg);
     setToastType(type);
-    setTimeout(() => setToast((prev) => (prev === msg ? null : prev)), 3200);
+    setTimeout(() => setToast((prev) => (prev === msg ? null : prev)), 3000);
   }, []);
 
   // --- Auto-scroll to bottom of chat ---
@@ -51,7 +49,7 @@ export default function App() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
 
-  // --- Periodic backend health check ---
+  // --- Backend health check ---
   useEffect(() => {
     checkHealth().then((data) => {
       if (data.status === 'healthy') {
@@ -73,18 +71,16 @@ export default function App() {
   }, [prompt]);
 
   // =========================================================================
-  // SEND MESSAGE (Direct fetch to /api/chat with Groq LangGraph Backend)
+  // SEND MESSAGE
   // =========================================================================
-  const handleSend = useCallback(async (customText = null, customMode = null) => {
+  const handleSend = useCallback(async (customText = null) => {
     const textToSend = (customText !== null ? customText : prompt).trim();
     if (!textToSend || isLoading) return;
 
     if (customText === null) setPrompt('');
 
-    const effectiveMode = customMode || mode;
-
     // Append user message immediately
-    const userMsg = { role: 'user', content: textToSend, mode: effectiveMode, timestamp: Date.now() };
+    const userMsg = { role: 'user', content: textToSend, timestamp: Date.now() };
     setMessages((prev) => [...prev, userMsg]);
     setIsLoading(true);
 
@@ -96,14 +92,14 @@ export default function App() {
     );
 
     try {
-      // Direct call to FastAPI backend
+      // Real API call to FastAPI / LangGraph backend
       const data = await sendChatMessage({
         message: textToSend,
         threadId: threadId,
-        mode: effectiveMode,
+        mode: 'default',
       });
 
-      // Append assistant's LangGraph tutor response
+      // Append assistant's response
       setMessages((prev) => [
         ...prev,
         {
@@ -132,11 +128,8 @@ export default function App() {
       triggerToast(errorMsg, 'error');
     } finally {
       setIsLoading(false);
-      if (effectiveMode !== 'default') {
-        setMode('default');
-      }
     }
-  }, [prompt, mode, threadId, isLoading, triggerToast]);
+  }, [prompt, threadId, isLoading, triggerToast]);
 
   // =========================================================================
   // NEW CHAT / RESET SESSION
@@ -146,77 +139,48 @@ export default function App() {
     setThreadId(newId);
     setMessages([]);
     setPrompt('');
-    setMode('default');
     setIsLoading(false);
     setThreads((prev) => [
       { id: newId, label: 'New Session', messageCount: 0, createdAt: Date.now() },
       ...prev,
     ]);
-    triggerToast('Fresh study session started', 'success');
+    triggerToast('Started fresh session', 'success');
   }, [triggerToast]);
-
-  // =========================================================================
-  // QUICK CHIP HANDLER
-  // =========================================================================
-  const handleChipClick = useCallback((chip) => {
-    if (messages.length === 0) {
-      setMode(chip.id);
-      triggerToast(`Mode: ${chip.label}`, 'info');
-    } else {
-      handleSend(chip.message, chip.mode);
-    }
-  }, [messages, handleSend, triggerToast]);
-
-  // Status indicator helpers
-  const statusDot = backendStatus === 'connected' ? 'status-dot--green' :
-    backendStatus === 'degraded' ? 'status-dot--amber' : 'status-dot--red';
-  const statusText = backendStatus === 'connected' ? 'Connected to StudyFlow Backend (Groq)' :
-    backendStatus === 'degraded' ? 'Backend running (Groq degraded)' :
-    'Backend offline — run: uvicorn server:app --reload --port 8000';
-
-  // Starter Prompts
-  const starterPrompts = [
-    { text: 'Why do we need Recursion?', icon: '🔄' },
-    { text: 'Explain Gradient Descent from first principles', icon: '📉' },
-    { text: 'How do Neural Networks actually learn?', icon: '🧠' },
-    { text: 'What is a Hash Table and why is it O(1)?', icon: '🗂️' },
-  ];
 
   const hasMessages = messages.length > 0;
 
   return (
     <div className="app-root">
-      {/* Dynamic 3D Earth Background */}
-      <EarthBackground overlayOpacity={0.32} glowOpacity={0.45} />
+      {/* 3D Earth Background */}
+      <EarthBackground overlayOpacity={0.28} glowOpacity={0.4} />
 
-      {/* Sidebar for Thread History & Controls */}
+      {/* Minimal Translucent Sidebar for Chat History */}
       <aside className={`sidebar ${sidebarOpen ? 'sidebar--open' : ''}`}>
         <div className="sidebar-header">
           <div className="sidebar-brand">
-            <div className="brand-orb">
-              <div className="brand-orb-inner">
-                <div className="brand-play" />
-              </div>
-            </div>
-            <span className="brand-name">StudyFlow AI</span>
+            <div className="brand-wordmark">TISW</div>
+            <div className="brand-tagline">Teaching in a Structured Way</div>
           </div>
           <button
             type="button"
             className="sidebar-close"
             onClick={() => setSidebarOpen(false)}
+            title="Close sidebar"
+            aria-label="Close sidebar"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* New Chat Button */}
+        {/* Clean New Chat Action */}
         <button type="button" className="new-session-btn" onClick={handleNewSession}>
           <Plus className="w-4 h-4" />
           <span>New Chat</span>
         </button>
 
+        {/* Session History List */}
         <div className="sidebar-threads">
-          <div className="sidebar-section-label">Recent Sessions</div>
+          <div className="sidebar-section-label">History</div>
           {threads.map((thread) => (
             <button
               key={thread.id}
@@ -229,100 +193,56 @@ export default function App() {
             >
               <BookOpen className="w-3.5 h-3.5" />
               <span className="thread-label">{thread.label}</span>
-              {thread.messageCount > 0 && (
-                <span className="thread-badge">{thread.messageCount}</span>
-              )}
             </button>
           ))}
         </div>
-
-        <div className="sidebar-footer">
-          <div className="sidebar-status">
-            <span className={`status-dot ${statusDot}`} />
-            <span className="status-text">{statusText}</span>
-          </div>
-        </div>
       </aside>
 
-      {/* Sidebar overlay for mobile */}
+      {/* Sidebar overlay for mobile / backdrop click */}
       {sidebarOpen && (
         <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
       )}
 
-      {/* Main Chat Interface */}
+      {/* Main Workspace Interface */}
       <div className="main-wrapper">
-        {/* Top Header */}
+        {/* Minimal Transparent Header */}
         <header className="top-header">
           <div className="header-left">
             <button
               type="button"
-              className="menu-btn"
-              onClick={() => setSidebarOpen(true)}
+              className="header-icon-btn"
+              onClick={() => setSidebarOpen((prev) => !prev)}
+              title="Chat History"
+              aria-label="Chat History"
             >
-              <Layers className="w-5 h-5" />
+              <Layers className="w-4 h-4" />
             </button>
-            <div className="header-brand" onClick={handleNewSession} role="button" tabIndex={0}>
-              <div className="brand-orb brand-orb--sm">
-                <div className="brand-orb-inner">
-                  <div className="brand-play" />
-                </div>
-              </div>
-              <span className="brand-name">StudyFlow AI</span>
-            </div>
           </div>
 
           <div className="header-right">
-            {/* Thread ID badge */}
-            <div className="thread-badge-header">
-              <span className={`status-dot ${statusDot}`} />
-              <span>{threadId.slice(-8)}</span>
-            </div>
-
-            {/* Reset / New Chat icon button */}
             <button
               type="button"
               className="header-icon-btn"
               onClick={handleNewSession}
-              title="Reset / New Chat"
+              title="New Chat"
+              aria-label="New Chat"
             >
-              <RefreshCw className="w-4 h-4" />
+              <Plus className="w-4 h-4" />
             </button>
           </div>
         </header>
 
-        {/* Chat Messages Area */}
+        {/* Chat / Content Area */}
         <main className="chat-area">
-          {/* Hero greeting when empty */}
+          {/* Minimalist Empty State when no conversation has started */}
           {!hasMessages && (
-            <div className="hero-section">
-              <div className="hero-badge">
-                <div className="hero-badge-inner">
-                  <div className="brand-play" />
-                </div>
-              </div>
-              <h1 className="hero-title">Hi, I'm StudyFlow AI</h1>
-              <p className="hero-subtitle">
-                How can we build your intuition from first principles today?
-              </p>
-
-              {/* Starter prompts */}
-              <div className="starter-grid">
-                {starterPrompts.map((sp, i) => (
-                  <button
-                    key={i}
-                    type="button"
-                    className="starter-card"
-                    onClick={() => handleSend(sp.text)}
-                  >
-                    <span className="starter-icon">{sp.icon}</span>
-                    <span className="starter-text">{sp.text}</span>
-                  </button>
-                ))}
-              </div>
+            <div className="hero-minimal">
+              <h1 className="hero-wordmark">TISW</h1>
+              <p className="hero-tagline">Teaching in a Structured Way</p>
             </div>
           )}
 
-          {/* Conversation history */}
+          {/* Conversation messages */}
           {hasMessages && (
             <div className="messages-container">
               {messages.map((msg, index) => (
@@ -333,17 +253,11 @@ export default function App() {
                   {msg.role === 'user' ? (
                     <div className="message-bubble message-bubble--user">
                       {msg.content}
-                      {msg.mode && msg.mode !== 'default' && (
-                        <span className="message-mode-tag">{msg.mode}</span>
-                      )}
                     </div>
                   ) : (
                     <div className={`message-bubble message-bubble--assistant ${msg.isError ? 'message-bubble--error' : ''}`}>
                       <div className="assistant-header">
-                        <span className="assistant-badge">
-                          <Sparkles className="w-3.5 h-3.5" />
-                          <span>First-Principles Mentor</span>
-                        </span>
+                        <span className="assistant-label">TISW</span>
                       </div>
                       <div className="assistant-content">
                         <MarkdownRenderer content={msg.content} />
@@ -353,21 +267,16 @@ export default function App() {
                 </div>
               ))}
 
-              {/* Loading / Thinking Spinner */}
+              {/* Minimal Loading / Thinking indicator */}
               {isLoading && (
                 <div className="message-row message-row--assistant animate-fadeIn">
                   <div className="message-bubble message-bubble--assistant">
                     <div className="assistant-header">
-                      <span className="assistant-badge">
-                        <Sparkles className="w-3.5 h-3.5" />
-                        <span>First-Principles Mentor</span>
-                      </span>
+                      <span className="assistant-label">TISW</span>
                     </div>
-                    <div className="assistant-content">
-                      <div className="thinking-text">
-                        <RefreshCw className="w-3.5 h-3.5 spin" />
-                        <span>Deriving from first principles with Groq...</span>
-                      </div>
+                    <div className="thinking-text">
+                      <RefreshCw className="w-3.5 h-3.5 spin" />
+                      <span>Structuring response...</span>
                     </div>
                   </div>
                 </div>
@@ -378,28 +287,23 @@ export default function App() {
           )}
         </main>
 
-        {/* Bottom Input Controls */}
+        {/* Minimal Transparent Floating Input Area */}
         <div className="input-area">
-          {/* Quick pedagogical mode chips */}
-          <QuickActionChips
-            onChipClick={handleChipClick}
-            activeMode={mode}
-            disabled={isLoading}
-          />
-
           {/* Optional file drop zone */}
           {showFileZone && (
-            <FileDropZone
-              onUploadSuccess={(result) => {
-                triggerToast(`${result.filename} uploaded`, 'success');
-                setShowFileZone(false);
-              }}
-              onUploadError={(err) => triggerToast(err, 'error')}
-              disabled={isLoading}
-            />
+            <div className="file-zone-container">
+              <FileDropZone
+                onUploadSuccess={(result) => {
+                  triggerToast(`${result.filename} uploaded`, 'success');
+                  setShowFileZone(false);
+                }}
+                onUploadError={(err) => triggerToast(err, 'error')}
+                disabled={isLoading}
+              />
+            </div>
           )}
 
-          {/* Prompt input card */}
+          {/* Message Composer Card */}
           <div className="input-card">
             <textarea
               ref={textareaRef}
@@ -412,22 +316,21 @@ export default function App() {
                   handleSend();
                 }
               }}
-              placeholder="Ask anything — 'Why do we need this?', 'Go deeper', 'Teach me through questions'..."
+              placeholder="Ask anything..."
               className="input-textarea"
               disabled={isLoading}
             />
 
             <div className="input-controls">
-              <div className="input-controls-left">
-                <button
-                  type="button"
-                  className="input-icon-btn"
-                  onClick={() => setShowFileZone((prev) => !prev)}
-                  title="Upload document for context"
-                >
-                  <Paperclip className="w-4 h-4" />
-                </button>
-              </div>
+              <button
+                type="button"
+                className="input-icon-btn"
+                onClick={() => setShowFileZone((prev) => !prev)}
+                title="Attach document"
+                aria-label="Attach document"
+              >
+                <Paperclip className="w-4 h-4" />
+              </button>
 
               <button
                 type="button"
@@ -435,6 +338,7 @@ export default function App() {
                 onClick={() => handleSend()}
                 disabled={isLoading || !prompt.trim()}
                 title="Send message"
+                aria-label="Send message"
               >
                 {isLoading ? (
                   <RefreshCw className="w-4 h-4 spin" />
@@ -443,12 +347,6 @@ export default function App() {
                 )}
               </button>
             </div>
-          </div>
-
-          {/* Footer status label */}
-          <div className="input-footer">
-            <span className={`status-dot ${statusDot}`} />
-            <span className="input-footer-text">{statusText}</span>
           </div>
         </div>
       </div>

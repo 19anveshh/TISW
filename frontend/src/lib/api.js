@@ -1,5 +1,5 @@
 /**
- * api.js — Backend API client for StudyFlow AI.
+ * api.js — Backend API client for TISW (Teaching in a Structured Way).
  * Handles chat requests to FastAPI backend, health checks, thread resets, and uploads.
  */
 
