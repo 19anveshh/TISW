@@ -43,7 +43,7 @@ import time
 import hmac
 import hashlib
 import traceback
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Any
 
 # ── Windows UTF-8 console fix ──────────────────────────────────────────────────
 if sys.platform == "win32":
@@ -67,9 +67,18 @@ from main import (
     tutor_app,
     load_and_validate_groq_llm,
     create_tutor_graph,
+    NORMAL_MODE_PROMPT,
+    TISW_MODE_PROMPT,
     TEACHING_METHODOLOGY_PROMPT,
     build_system_message,
+    detect_mode_request,
     detect_persistent_preference,
+)
+from rag_engine import (
+    get_session_document_index,
+    prune_session_index,
+    SUPPORTED_EXTENSIONS,
+    FINAL_TOP_K,
 )
 
 # ── Fallback: try to init global tutor_app if main.py left it as None ─────────
@@ -111,10 +120,11 @@ _session_store: Dict[str, _SessionEntry] = {}
 
 
 def _prune_expired_sessions() -> None:
-    """Remove expired entries (called on every verify-key to avoid unbounded growth)."""
+    """Remove expired entries and wipe their associated document indexes."""
     expired = [k for k, v in _session_store.items() if v.is_expired()]
     for k in expired:
         del _session_store[k]
+        prune_session_index(k)
 
 
 def _resolve_session(token: str) -> _SessionEntry:
@@ -126,12 +136,28 @@ def _resolve_session(token: str) -> _SessionEntry:
     if entry is None or entry.is_expired():
         if entry is not None:
             del _session_store[token]
+            prune_session_index(token)
         raise HTTPException(
             status_code=401,
             detail="Session expired or invalid. Please verify your Groq API key again.",
         )
     entry.refresh()
     return entry
+
+
+def _get_effective_session_id(
+    x_session_token: Optional[str] = None,
+    x_client_session_id: Optional[str] = None,
+) -> str:
+    """
+    Determines the isolated session ID for document and retrieval scoping.
+    Ensures visitors have strictly isolated private document stores.
+    """
+    if x_session_token and x_session_token.strip():
+        return x_session_token.strip()
+    if x_client_session_id and x_client_session_id.strip():
+        return x_client_session_id.strip()
+    return "local-dev-session"
 
 
 def _build_llm_for_session(entry: _SessionEntry) -> ChatGroq:
@@ -147,7 +173,7 @@ def _build_llm_for_session(entry: _SessionEntry) -> ChatGroq:
 # APP SETUP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-app = FastAPI(title="TISW AI Tutor Backend", version="3.0.0")
+app = FastAPI(title="TISW AI Tutor Backend", version="3.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -170,14 +196,44 @@ class VerifyKeyResponse(BaseModel):
     model: str
     message: str
 
+class SourceItem(BaseModel):
+    filename: str
+    page_number: Optional[int] = None
+    chunk_id: str
+    snippet: str
+
 class ChatRequest(BaseModel):
     message: str
     thread_id: Optional[str] = None
-    mode: Optional[str] = "default"
+    mode: Optional[str] = None
+    rag_enabled: Optional[bool] = False
 
 class ChatResponse(BaseModel):
     response: str
     thread_id: str
+    mode: str = "normal"
+    rag_used: bool = False
+    sources: Optional[List[SourceItem]] = None
+
+class DocumentItem(BaseModel):
+    doc_id: str
+    filename: str
+    file_type: str
+    size_kb: float
+    chunk_count: int
+    uploaded_at: float
+
+class DocumentListResponse(BaseModel):
+    documents: List[DocumentItem]
+
+class UploadDocumentResponse(BaseModel):
+    status: str
+    doc_id: str
+    filename: str
+    file_type: str
+    size_kb: float
+    chunk_count: int
+    message: str
 
 class ResetResponse(BaseModel):
     message: str
@@ -209,21 +265,8 @@ def _classify_groq_error(error_msg: str) -> HTTPException:
 
 
 def enrich_message(user_text: str, mode: Optional[str] = None) -> str:
-    """Prepend mode-specific turn instructions (unchanged from original)."""
-    mode = (mode or "default").lower()
-    prefix = ""
-    if mode == "brief":
-        prefix = "[Instruction: explain briefly / TL;DR, direct and concise]\n"
-    elif mode == "deep":
-        prefix = "[Instruction: go deeper / under the hood / architectural deep dive]\n"
-    elif mode == "socratic":
-        prefix = "[Instruction: teach me through Socratic questions]\n"
-    elif mode == "confused":
-        prefix = (
-            "[Instruction: The student is confused. Never repeat the same explanation. "
-            "Step back, drop abstraction down one level, switch to a fresh everyday analogy.]\n"
-        )
-    return prefix + user_text
+    """User input text is passed directly. Modes are cleanly handled by the tutor graph."""
+    return user_text
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -279,16 +322,13 @@ async def verify_key(payload: VerifyKeyRequest):
 async def chat_endpoint(
     payload: ChatRequest,
     x_session_token: Optional[str] = Header(default=None, alias="X-Session-Token"),
+    x_client_session_id: Optional[str] = Header(default=None, alias="X-Client-Session-Id"),
 ):
     """
-    Core chat endpoint.
-
-    Key resolution order:
-      1. If X-Session-Token is present → resolve visitor's key from session store.
-      2. Else → fall back to server env GROQ_API_KEY (local dev only).
-
-    In both cases a per-request ChatGroq instance is built so no key ever
-    leaks across different visitors or requests.
+    Core chat endpoint supporting:
+    - Normal Mode (direct, simple English)
+    - TISW Mode (deep first-principles structured teaching)
+    - Optional Document-based RAG with Hybrid Retrieval (Vector + BM25 + Weighted RRF)
     """
     user_text = payload.message.strip()
     if not user_text:
@@ -296,6 +336,53 @@ async def chat_endpoint(
 
     thread_id = (payload.thread_id or "").strip() or f"study-session-{uuid.uuid4().hex[:8]}"
     enriched = enrich_message(user_text, payload.mode)
+
+    # ── Session & RAG context resolution ──────────────────────────────────────
+    effective_session_id = _get_effective_session_id(x_session_token, x_client_session_id)
+    doc_index = get_session_document_index(effective_session_id)
+
+    rag_enabled = bool(payload.rag_enabled)
+    rag_used = False
+    sources: List[SourceItem] = []
+    rag_context_str: Optional[str] = None
+
+    if rag_enabled:
+        doc_count = len(doc_index.documents)
+        if doc_count == 0:
+            # RAG enabled but no documents uploaded yet — explain clearly to user
+            return ChatResponse(
+                response="⚠️ **RAG is enabled, but no documents have been uploaded yet.**\n\n"
+                         "Please upload a PDF, DOCX, or TXT document using the paperclip or document manager in the sidebar before querying your documents.",
+                thread_id=thread_id,
+                mode=payload.mode or "normal",
+                rag_used=False,
+                sources=[],
+            )
+
+        # Retrieve top chunks via Hybrid Search (Vector + BM25 + 50/50 RRF)
+        retrieved_chunks = doc_index.hybrid_search(
+            query=user_text,
+            final_top_k=FINAL_TOP_K,
+        )
+
+        if retrieved_chunks:
+            rag_used = True
+            context_blocks = []
+            for i, chunk in enumerate(retrieved_chunks, start=1):
+                page_info = f", Page {chunk.page_number}" if chunk.page_number is not None else ""
+                context_blocks.append(
+                    f"--- EXCERPT {i} ---\n[Source: {chunk.filename}{page_info} | Chunk ID: {chunk.chunk_id}]\n{chunk.text}"
+                )
+                snippet = chunk.text[:220].strip() + ("…" if len(chunk.text) > 220 else "")
+                sources.append(
+                    SourceItem(
+                        filename=chunk.filename,
+                        page_number=chunk.page_number,
+                        chunk_id=chunk.chunk_id,
+                        snippet=snippet,
+                    )
+                )
+            rag_context_str = "\n\n".join(context_blocks)
 
     # ── Resolve which key/checkpointer/graph to use ────────────────────────────
     if x_session_token:
@@ -314,9 +401,15 @@ async def chat_endpoint(
 
     config = {"configurable": {"thread_id": thread_id}}
 
+    invoke_payload: Dict[str, Any] = {"messages": [HumanMessage(content=enriched)]}
+    if payload.mode in {"normal", "tisw"}:
+        invoke_payload["active_mode"] = payload.mode
+    if rag_context_str:
+        invoke_payload["rag_context"] = rag_context_str
+
     try:
         result = graph.invoke(
-            {"messages": [HumanMessage(content=enriched)]},
+            invoke_payload,
             config=config,
         )
         msgs = result.get("messages", [])
@@ -324,12 +417,18 @@ async def chat_endpoint(
             raise HTTPException(status_code=500, detail="Empty response from LangGraph.")
 
         tutor_reply = str(msgs[-1].content)
-        return ChatResponse(response=tutor_reply, thread_id=thread_id)
+        active_mode = result.get("active_mode", "normal")
+        return ChatResponse(
+            response=tutor_reply,
+            thread_id=thread_id,
+            mode=active_mode,
+            rag_used=rag_used,
+            sources=sources,
+        )
 
     except HTTPException:
         raise
     except Exception as exc:
-        # Log traceback without the key
         print(f"[CHAT ERROR] {traceback.format_exc()}", file=sys.stderr)
         raise _classify_groq_error(str(exc))
 
@@ -354,19 +453,76 @@ def reset_session():
     return ResetResponse(message="Fresh study session initialized", thread_id=new_thread_id)
 
 
-@app.post("/api/upload")
-async def upload_document(file: UploadFile = File(...)):
-    """Accepts document uploads for contextual tutor ingestion."""
+# ═══════════════════════════════════════════════════════════════════════════════
+# DOCUMENT MANAGEMENT & INGESTION (SESSION ISOLATED)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/upload", response_model=UploadDocumentResponse)
+async def upload_document(
+    file: UploadFile = File(...),
+    x_session_token: Optional[str] = Header(default=None, alias="X-Session-Token"),
+    x_client_session_id: Optional[str] = Header(default=None, alias="X-Client-Session-Id"),
+):
+    """
+    Accepts and indexes a document for the current session's hybrid RAG store.
+    Supports PDF, DOCX, and TXT files only.
+    """
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file uploaded.")
-    content = await file.read()
-    size_kb = round(len(content) / 1024, 1)
-    return {
-        "status": "success",
-        "filename": file.filename,
-        "size_kb": size_kb,
-        "message": f"Document '{file.filename}' ({size_kb} KB) uploaded successfully.",
-    }
+
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext}'. Supported formats: {', '.join(sorted(SUPPORTED_EXTENSIONS))}",
+        )
+
+    session_id = _get_effective_session_id(x_session_token, x_client_session_id)
+    doc_index = get_session_document_index(session_id)
+
+    try:
+        content = await file.read()
+        meta = doc_index.add_document(file.filename, content)
+        return UploadDocumentResponse(
+            status="success",
+            doc_id=meta.doc_id,
+            filename=meta.filename,
+            file_type=meta.file_type,
+            size_kb=meta.size_kb,
+            chunk_count=meta.chunk_count,
+            message=f"Document '{meta.filename}' ({meta.size_kb} KB, {meta.chunk_count} chunks) indexed successfully.",
+        )
+    except ValueError as val_err:
+        raise HTTPException(status_code=400, detail=str(val_err))
+    except Exception as exc:
+        print(f"[UPLOAD ERROR] {traceback.format_exc()}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail=f"Failed to process document: {str(exc)}")
+
+
+@app.get("/api/documents", response_model=DocumentListResponse)
+def list_documents(
+    x_session_token: Optional[str] = Header(default=None, alias="X-Session-Token"),
+    x_client_session_id: Optional[str] = Header(default=None, alias="X-Client-Session-Id"),
+):
+    """Lists all documents indexed for the current session."""
+    session_id = _get_effective_session_id(x_session_token, x_client_session_id)
+    doc_index = get_session_document_index(session_id)
+    return DocumentListResponse(documents=doc_index.list_documents())
+
+
+@app.delete("/api/documents/{doc_id}")
+def delete_document(
+    doc_id: str,
+    x_session_token: Optional[str] = Header(default=None, alias="X-Session-Token"),
+    x_client_session_id: Optional[str] = Header(default=None, alias="X-Client-Session-Id"),
+):
+    """Deletes a document from the session index and purges its vector and BM25 entries."""
+    session_id = _get_effective_session_id(x_session_token, x_client_session_id)
+    doc_index = get_session_document_index(session_id)
+    removed = doc_index.remove_document(doc_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Document not found or already removed.")
+    return {"status": "success", "message": "Document removed and index updated."}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

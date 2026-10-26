@@ -42,16 +42,28 @@ export async function verifyGroqKey(apiKey) {
  * Sends a chat message to the FastAPI/LangGraph backend.
  *
  * @param {Object} params
- * @param {string} params.message    — user's prompt
- * @param {string} params.threadId   — current conversation thread ID
- * @param {string} [params.mode]     — optional pedagogical mode
- * @param {string|null} [params.sessionToken] — visitor session token
- * @returns {Promise<{ response: string, thread_id: string }>}
+ * @param {string} params.message         — user's prompt
+ * @param {string} params.threadId        — current conversation thread ID
+ * @param {string} [params.mode]          — pedagogical mode ('normal' | 'tisw')
+ * @param {string|null} [params.sessionToken]    — visitor session token
+ * @param {string|null} [params.clientSessionId] — isolated client session ID
+ * @param {boolean} [params.ragEnabled]   — whether document RAG is active
+ * @returns {Promise<{ response: string, thread_id: string, mode: string, rag_used: boolean, sources?: Array }>}
  */
-export async function sendChatMessage({ message, threadId, mode, sessionToken }) {
+export async function sendChatMessage({
+  message,
+  threadId,
+  mode,
+  sessionToken,
+  clientSessionId,
+  ragEnabled = false,
+}) {
   const headers = { "Content-Type": "application/json" };
   if (sessionToken) {
     headers["X-Session-Token"] = sessionToken;
+  }
+  if (clientSessionId) {
+    headers["X-Client-Session-Id"] = clientSessionId;
   }
 
   const res = await fetch(`${API_BASE}/api/chat`, {
@@ -60,7 +72,8 @@ export async function sendChatMessage({ message, threadId, mode, sessionToken })
     body: JSON.stringify({
       message,
       thread_id: threadId,
-      mode: mode || "default",
+      mode: mode || "normal",
+      rag_enabled: Boolean(ragEnabled),
     }),
   });
 
@@ -72,19 +85,30 @@ export async function sendChatMessage({ message, threadId, mode, sessionToken })
   return res.json();
 }
 
-// ─── File Upload ───────────────────────────────────────────────────────────────
+// ─── File & Document Management ───────────────────────────────────────────────
+
+export const SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".txt"];
 
 /**
- * Uploads a study document for context ingestion.
+ * Uploads a study document for hybrid RAG indexing.
+ * Supports PDF, DOCX, and TXT files only.
+ *
  * @param {File} file
  * @param {string|null} [sessionToken]
+ * @param {string|null} [clientSessionId]
  */
-export async function uploadFile(file, sessionToken) {
+export async function uploadFile(file, sessionToken, clientSessionId) {
+  const ext = "." + (file.name.split(".").pop() || "").toLowerCase();
+  if (!SUPPORTED_EXTENSIONS.includes(ext)) {
+    throw new Error(`Unsupported file type '${ext}'. Please upload a PDF, DOCX, or TXT file.`);
+  }
+
   const formData = new FormData();
   formData.append("file", file);
 
   const headers = {};
   if (sessionToken) headers["X-Session-Token"] = sessionToken;
+  if (clientSessionId) headers["X-Client-Session-Id"] = clientSessionId;
 
   const res = await fetch(`${API_BASE}/api/upload`, {
     method: "POST",
@@ -95,6 +119,56 @@ export async function uploadFile(file, sessionToken) {
   if (!res.ok) {
     const errData = await res.json().catch(() => ({}));
     throw new Error(errData.detail || `Upload failed (${res.status})`);
+  }
+
+  return res.json();
+}
+
+/**
+ * Fetches the list of uploaded documents for the active session.
+ *
+ * @param {string|null} [sessionToken]
+ * @param {string|null} [clientSessionId]
+ * @returns {Promise<{ documents: Array }>}
+ */
+export async function fetchDocuments(sessionToken, clientSessionId) {
+  const headers = {};
+  if (sessionToken) headers["X-Session-Token"] = sessionToken;
+  if (clientSessionId) headers["X-Client-Session-Id"] = clientSessionId;
+
+  const res = await fetch(`${API_BASE}/api/documents`, {
+    method: "GET",
+    headers,
+  });
+
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.detail || `Failed to fetch documents (${res.status})`);
+  }
+
+  return res.json();
+}
+
+/**
+ * Deletes a document from the session index.
+ *
+ * @param {string} docId
+ * @param {string|null} [sessionToken]
+ * @param {string|null} [clientSessionId]
+ */
+export async function deleteDocument(docId, sessionToken, clientSessionId) {
+  const headers = {};
+  if (sessionToken) headers["X-Session-Token"] = sessionToken;
+  if (clientSessionId) headers["X-Client-Session-Id"] = clientSessionId;
+
+  const res = await fetch(`${API_BASE}/api/documents/${docId}`, {
+    method: "DELETE",
+    headers,
+  });
+
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.detail || `Failed to delete document (${res.status})`);
   }
 
   return res.json();

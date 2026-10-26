@@ -137,3 +137,29 @@ export const HelpCircle = createIcon([
   "path d='M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3'",
   "path d='M12 17h.01'"
 ]);
+
+export const ChevronDown = createIcon("m6 9 6 6 6-6");
+export const ArrowUpRight = createIcon(["M7 17L17 7", "M7 7h10v10"]);
+
+export const FileText = createIcon([
+  "M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z",
+  "M14 2v6h6",
+  "M16 13H8",
+  "M16 17H8",
+  "M10 9H8"
+]);
+
+export const Trash2 = createIcon([
+  "M3 6h18",
+  "M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6",
+  "M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2",
+  "M10 11v6",
+  "M14 11v6"
+]);
+
+export const Database = createIcon([
+  "ellipse cx='12' cy='5' rx='9' ry='3'",
+  "M3 5v14a9 3 0 0 0 18 0V5",
+  "M3 12a9 3 0 0 0 18 0"
+]);
+

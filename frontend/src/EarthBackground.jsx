@@ -132,29 +132,30 @@ export default function EarthBackground({
 
   return (
     <div className="earth-bg-root">
-      {/* Canvas rendering sequential Earth frames */}
+      {/* Canvas rendering sequential Earth frames with violet planetary color-grading */}
       <canvas
         ref={canvasRef}
         className="earth-bg-canvas"
+        style={{
+          filter: 'hue-rotate(242deg) saturate(135%) brightness(0.68) contrast(112%)',
+        }}
       />
 
       {/* Atmospheric space vignette overlay for high contrast text readability */}
       <div
         className="earth-bg-overlay"
         style={{
-          background: `radial-gradient(circle at 50% 45%, rgba(18, 14, 28, ${overlayOpacity * 0.5}) 0%, rgba(10, 8, 18, ${overlayOpacity * 1.5}) 100%)`,
-          backdropFilter: 'blur(1.5px)',
-          WebkitBackdropFilter: 'blur(1.5px)',
+          background: `radial-gradient(circle at 50% 35%, rgba(16, 12, 26, ${overlayOpacity * 0.4}) 0%, rgba(8, 6, 14, ${overlayOpacity * 1.6}) 100%)`,
         }}
       />
 
-      {/* Glowing cosmic violet / lavender atmospheric nebula glow */}
+      {/* Glowing cosmic violet / lavender atmospheric nebula glow in top-left matching screenshot */}
       <div
         className="earth-bg-glow"
         style={{
           background:
-            'radial-gradient(circle, rgba(168, 85, 247, 0.32) 0%, rgba(192, 132, 252, 0.18) 40%, rgba(15, 12, 25, 0) 72%)',
-          filter: 'blur(45px)',
+            'radial-gradient(circle at 20% 20%, rgba(168, 85, 247, 0.28) 0%, rgba(124, 58, 237, 0.16) 35%, rgba(9, 7, 16, 0) 70%)',
+          filter: 'blur(50px)',
           opacity: glowOpacity
         }}
       />
@@ -163,14 +164,14 @@ export default function EarthBackground({
       <div
         className="earth-bg-accent-tr"
         style={{
-          background: 'radial-gradient(circle, rgba(147, 51, 234, 0.18) 0%, transparent 65%)',
-          filter: 'blur(50px)'
+          background: 'radial-gradient(circle, rgba(147, 51, 234, 0.2) 0%, transparent 65%)',
+          filter: 'blur(55px)'
         }}
       />
       <div
         className="earth-bg-accent-bl"
         style={{
-          background: 'radial-gradient(circle, rgba(192, 132, 252, 0.14) 0%, transparent 65%)',
+          background: 'radial-gradient(circle, rgba(168, 85, 247, 0.15) 0%, transparent 65%)',
           filter: 'blur(60px)'
         }}
       />

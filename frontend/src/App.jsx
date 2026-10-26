@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Layers, Plus, X, Send, Paperclip, RefreshCw, BookOpen
+  Layers, Plus, X, Send, Paperclip, RefreshCw, BookOpen, ChevronDown, ArrowUpRight, Database, FileText
 } from './icons';
 import EarthBackground from './EarthBackground';
 import MarkdownRenderer from './components/MarkdownRenderer';
 import FileDropZone from './components/FileDropZone';
+import DocumentManager from './components/DocumentManager';
+import SourceCitations from './components/SourceCitations';
 import Toast from './components/Toast';
-import { sendChatMessage, checkHealth, verifyGroqKey } from './lib/api';
+import { sendChatMessage, checkHealth, verifyGroqKey, fetchDocuments } from './lib/api';
 
 // ============================================================================
 // Eye icon (show/hide password)
@@ -27,16 +29,15 @@ function EyeIcon({ open }) {
 }
 
 // ============================================================================
-// GroqKeyWidget — inline sidebar or hero section
+// ============================================================================
+// GroqKeyWidget — inline sidebar section
 // Props:
 //   sessionToken  string|null   — opaque token held in App state
 //   onVerified    fn(token)     — called when key passes backend verification
 //   onClear       fn()          — called when user removes the key
-//   variant       'sidebar'|'hero'
 // ============================================================================
-function GroqKeyWidget({ sessionToken, onVerified, onClear, variant = 'sidebar' }) {
-  const isHero = variant === 'hero';
-  const [expanded, setExpanded]   = useState(isHero);
+function GroqKeyWidget({ sessionToken, onVerified, onClear }) {
+  const [expanded, setExpanded]   = useState(false);
   const [apiKey, setApiKey]       = useState('');
   const [showKey, setShowKey]     = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -52,9 +53,7 @@ function GroqKeyWidget({ sessionToken, onVerified, onClear, variant = 'sidebar' 
   };
 
   const handleCancel = () => {
-    if (!isHero) {
-      setExpanded(false);
-    }
+    setExpanded(false);
     setApiKey('');
     setError('');
   };
@@ -68,7 +67,7 @@ function GroqKeyWidget({ sessionToken, onVerified, onClear, variant = 'sidebar' 
       const data = await verifyGroqKey(trimmed);
       // Store only the opaque token — raw key is discarded here
       setApiKey('');
-      if (!isHero) setExpanded(false);
+      setExpanded(false);
       onVerified(data.session_token);
     } catch (err) {
       setError(err.message || 'Verification failed.');
@@ -79,20 +78,20 @@ function GroqKeyWidget({ sessionToken, onVerified, onClear, variant = 'sidebar' 
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter') handleVerify();
-    if (e.key === 'Escape' && !isHero) handleCancel();
+    if (e.key === 'Escape') handleCancel();
   };
 
   // ── Connected state ────────────────────────────────────────────────────────
   if (connected && !expanded) {
     return (
-      <div className={`groq-widget ${isHero ? 'groq-widget--hero' : ''}`}>
+      <div className="groq-widget">
         <div className="groq-widget-row">
           <span className="groq-badge">G</span>
           <span className="groq-widget-status connected">Groq connected</span>
           <button
             type="button"
             className="groq-widget-action"
-            onClick={() => { onClear(); if (!isHero) setExpanded(false); }}
+            onClick={() => { onClear(); setExpanded(false); }}
             title="Remove key"
           >
             Change
@@ -124,17 +123,13 @@ function GroqKeyWidget({ sessionToken, onVerified, onClear, variant = 'sidebar' 
 
   // ── Expanded form ──────────────────────────────────────────────────────────
   return (
-    <div className={`groq-widget groq-widget--expanded ${isHero ? 'groq-widget--hero' : ''}`}>
+    <div className="groq-widget groq-widget--expanded">
       <div className="groq-form-header">
         <span className="groq-badge">G</span>
-        <span className="groq-form-title">
-          {isHero ? 'Enter Groq API Key to Start' : 'Paste your Groq API key'}
-        </span>
-        {!isHero && (
-          <button type="button" className="groq-form-cancel-x" onClick={handleCancel} aria-label="Cancel">
-            <X className="w-3.5 h-3.5" />
-          </button>
-        )}
+        <span className="groq-form-title">Paste your Groq API key</span>
+        <button type="button" className="groq-form-cancel-x" onClick={handleCancel} aria-label="Cancel">
+          <X className="w-3.5 h-3.5" />
+        </button>
       </div>
 
       <div className="groq-input-wrap">
@@ -145,7 +140,7 @@ function GroqKeyWidget({ sessionToken, onVerified, onClear, variant = 'sidebar' 
           value={apiKey}
           onChange={(e) => { setApiKey(e.target.value); setError(''); }}
           onKeyDown={handleKeyDown}
-          placeholder="Paste your Groq key (gsk_...)"
+          placeholder="gsk_..."
           autoComplete="off"
           spellCheck={false}
           disabled={verifying}
@@ -177,11 +172,9 @@ function GroqKeyWidget({ sessionToken, onVerified, onClear, variant = 'sidebar' 
       </p>
 
       <div className="groq-form-actions">
-        {(!isHero || apiKey) && (
-          <button type="button" className="groq-cancel-btn" onClick={handleCancel} disabled={verifying}>
-            {isHero ? 'Clear' : 'Cancel'}
-          </button>
-        )}
+        <button type="button" className="groq-cancel-btn" onClick={handleCancel} disabled={verifying}>
+          Cancel
+        </button>
         <button
           type="button"
           className="groq-verify-btn"
@@ -194,7 +187,7 @@ function GroqKeyWidget({ sessionToken, onVerified, onClear, variant = 'sidebar' 
               Verifying…
             </>
           ) : (
-            'Verify & Connect'
+            'Verify & Save'
           )}
         </button>
       </div>
@@ -216,6 +209,12 @@ export default function App() {
   // null  → no visitor key configured (falls back to server env key if present)
   // str   → visitor's opaque session token from /api/verify-key
   const [sessionToken, setSessionToken] = useState(null);
+  const [activeMode, setActiveMode]     = useState('normal');
+
+  // --- Document RAG state (isolated per visitor/session) ---
+  const [clientSessionId]               = useState(() => `client-${crypto.randomUUID().slice(0, 10)}`);
+  const [ragEnabled, setRagEnabled]     = useState(false);
+  const [documents, setDocuments]       = useState([]);
 
   // --- UI state ---
   const [sidebarOpen, setSidebarOpen]   = useState(false);
@@ -287,13 +286,26 @@ export default function App() {
       const data = await sendChatMessage({
         message: textToSend,
         threadId,
-        mode: 'default',
-        sessionToken,   // opaque token — null if using server env key
+        mode: activeMode,
+        sessionToken,       // opaque token — null if using server env key
+        clientSessionId,    // isolated client session for RAG document store
+        ragEnabled,
       });
+
+      if (data.mode) {
+        setActiveMode(data.mode);
+      }
 
       setMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: data.response, timestamp: Date.now() },
+        {
+          role: 'assistant',
+          content: data.response,
+          mode: data.mode || 'normal',
+          rag_used: Boolean(data.rag_used),
+          sources: data.sources || [],
+          timestamp: Date.now()
+        },
       ]);
 
       if (data.thread_id) setThreadId(data.thread_id);
@@ -326,7 +338,7 @@ export default function App() {
     } finally {
       setIsLoading(false);
     }
-  }, [prompt, threadId, isLoading, triggerToast, sessionToken]);
+  }, [prompt, threadId, isLoading, triggerToast, sessionToken, clientSessionId, ragEnabled, activeMode]);
 
   // =========================================================================
   // NEW CHAT / RESET SESSION
@@ -337,6 +349,7 @@ export default function App() {
     setMessages([]);
     setPrompt('');
     setIsLoading(false);
+    setActiveMode('normal');
     setThreads((prev) => [
       { id: newId, label: 'New Session', messageCount: 0, createdAt: Date.now() },
       ...prev,
@@ -388,6 +401,25 @@ export default function App() {
           }}
         />
 
+        {/* Document RAG & Knowledge Base Manager */}
+        <DocumentManager
+          ragEnabled={ragEnabled}
+          onToggleRag={(val) => {
+            setRagEnabled(val);
+            triggerToast(
+              val
+                ? `Knowledge Base (RAG) enabled (${documents.length} document${documents.length === 1 ? '' : 's'})`
+                : 'Knowledge Base (RAG) disabled',
+              'info'
+            );
+          }}
+          sessionToken={sessionToken}
+          clientSessionId={clientSessionId}
+          onToast={triggerToast}
+          documents={documents}
+          setDocuments={setDocuments}
+        />
+
         {/* Session History */}
         <div className="sidebar-threads">
           <div className="sidebar-section-label">History</div>
@@ -416,51 +448,123 @@ export default function App() {
       {/* Main workspace */}
       <div className="main-wrapper">
         <header className="top-header">
-          <div className="header-left">
-            <button
-              type="button"
-              className="header-icon-btn"
-              onClick={() => setSidebarOpen((prev) => !prev)}
-              title="Chat History"
-              aria-label="Chat History"
-            >
-              <Layers className="w-4 h-4" />
-            </button>
+          <div className="header-brand" onClick={() => setSidebarOpen(false)}>
+            <span className="brand-logo-text">TISW</span>
           </div>
-          <div className="header-right">
+
+          <nav className="header-nav">
+            <button type="button" className="nav-link" onClick={() => triggerToast('TISW — Teaching in a Structured Way', 'info')}>
+              About
+            </button>
             <button
               type="button"
-              className="header-icon-btn"
+              className={`nav-link nav-link--mode ${activeMode === 'tisw' ? 'nav-link--tisw' : ''}`}
+              onClick={() => triggerToast(
+                activeMode === 'tisw'
+                  ? 'TISW Mode is active. Type "answer normally" to return to Normal Mode.'
+                  : 'Normal Mode is default. Type "explain using TISW" to activate structured teaching.',
+                'info'
+              )}
+              title="Active Mode (Normal vs TISW)"
+            >
+              <span className={`mode-dot ${activeMode === 'tisw' ? 'mode-dot--tisw' : ''}`} />
+              <span>{activeMode === 'tisw' ? 'TISW Mode' : 'Normal Mode'}</span>
+            </button>
+            <button
+              type="button"
+              className={`nav-link nav-link--rag ${ragEnabled ? 'nav-link--rag-active' : ''}`}
+              onClick={() => {
+                setRagEnabled((v) => !v);
+                triggerToast(
+                  !ragEnabled
+                    ? `Knowledge Base (RAG) enabled (${documents.length} document${documents.length === 1 ? '' : 's'})`
+                    : 'Knowledge Base (RAG) disabled — answering from general tutor knowledge',
+                  'info'
+                );
+              }}
+              title="Toggle Knowledge Base (RAG)"
+            >
+              <span className={`mode-dot ${ragEnabled ? 'mode-dot--rag' : ''}`} />
+              <span>{ragEnabled ? `RAG: ON (${documents.length})` : 'RAG: OFF'}</span>
+            </button>
+            <button type="button" className="nav-link" onClick={() => triggerToast('Active Curriculum: Computer Science, Mathematics, Engineering, Sciences', 'info')}>
+              Curriculum
+            </button>
+            <button type="button" className="nav-link" onClick={() => triggerToast('Normal Mode gives direct answers; TISW Mode gives deep structured lessons', 'info')}>
+              FAQ
+            </button>
+            <button type="button" className="nav-link nav-link--dropdown" onClick={() => setSidebarOpen(true)}>
+              <span>{sessionToken ? 'Groq Active' : 'Groq Key'}</span>
+              <ChevronDown className="w-3.5 h-3.5" />
+            </button>
+          </nav>
+
+          <div className="header-actions">
+            <button
+              type="button"
+              className="nav-btn-ghost"
+              onClick={() => setSidebarOpen((prev) => !prev)}
+              title="Sessions & Groq Key"
+              aria-label="Sessions"
+            >
+              Sessions
+            </button>
+            <button
+              type="button"
+              className="nav-btn-pill"
               onClick={handleNewSession}
-              title="New Chat"
+              title="Start a new chat session"
               aria-label="New Chat"
             >
-              <Plus className="w-4 h-4" />
+              <span>New Chat</span>
             </button>
           </div>
         </header>
 
         <main className="chat-area">
           {!hasMessages && (
-            <div className="hero-minimal">
-              <h1 className="hero-wordmark">TISW</h1>
-              <p className="hero-tagline">Teaching in a Structured Way</p>
-              {!sessionToken && (
-                <div className="hero-groq-container">
-                  <GroqKeyWidget
-                    sessionToken={sessionToken}
-                    onVerified={(token) => {
-                      setSessionToken(token);
-                      triggerToast("Groq API key verified — you're connected!", 'success');
-                    }}
-                    onClear={() => {
-                      setSessionToken(null);
-                      triggerToast('API key removed', 'info');
-                    }}
-                    variant="hero"
-                  />
+            <div className="hero-container">
+              <div className="hero-content">
+                <h1 className="hero-title">
+                  Elevate Your<br />
+                  Learning Experience
+                </h1>
+                <p className="hero-subtitle">
+                  Unlock your learning potential in a structured AI environment, powered by TISW & Groq
+                </p>
+                <button
+                  type="button"
+                  className="hero-cta-btn"
+                  onClick={() => textareaRef.current?.focus()}
+                >
+                  <span>Start Learning & Chat</span>
+                </button>
+              </div>
+
+              {/* Floating Feature Glass Cards matching reference screenshot */}
+              <div className="hero-floating-card hero-floating-card--left">
+                <div className="floating-card-header">
+                  <span className="floating-card-tag">Structured Path</span>
+                  <div className="floating-card-badge">
+                    <ArrowUpRight className="w-3 h-3" />
+                  </div>
                 </div>
-              )}
+                <div className="floating-card-title">Adaptive Concept Mastery</div>
+                <div className="floating-card-meta">Step-by-Step AI</div>
+              </div>
+
+              <div className="hero-floating-card hero-floating-card--right">
+                <div className="floating-card-header">
+                  <span className="floating-card-tag">Concept Mastery</span>
+                  <div className="floating-card-badge">
+                    <ArrowUpRight className="w-3 h-3" />
+                  </div>
+                </div>
+                <div className="floating-card-value">98%</div>
+                <div className="floating-card-bar">
+                  <div className="floating-card-bar-fill" />
+                </div>
+              </div>
             </div>
           )}
 
@@ -479,10 +583,19 @@ export default function App() {
                     <div className={`message-bubble message-bubble--assistant ${msg.isError ? 'message-bubble--error' : ''}`}>
                       <div className="assistant-header">
                         <span className="assistant-label">TISW</span>
+                        {msg.mode === 'tisw' && (
+                          <span className="assistant-mode-badge tisw">TISW Structured</span>
+                        )}
+                        {msg.rag_used && (
+                          <span className="assistant-mode-badge rag">RAG Grounded</span>
+                        )}
                       </div>
                       <div className="assistant-content">
                         <MarkdownRenderer content={msg.content} />
                       </div>
+                      {msg.sources && msg.sources.length > 0 && (
+                        <SourceCitations sources={msg.sources} />
+                      )}
                     </div>
                   )}
                 </div>
@@ -513,11 +626,17 @@ export default function App() {
             <div className="file-zone-container">
               <FileDropZone
                 onUploadSuccess={(result) => {
-                  triggerToast(`${result.filename} uploaded`, 'success');
+                  triggerToast(`${result.filename} uploaded & indexed`, 'success');
+                  setRagEnabled(true);
+                  fetchDocuments(sessionToken, clientSessionId)
+                    .then((data) => setDocuments(data.documents || []))
+                    .catch(() => {});
                   setShowFileZone(false);
                 }}
                 onUploadError={(err) => triggerToast(err, 'error')}
                 disabled={isLoading}
+                sessionToken={sessionToken}
+                clientSessionId={clientSessionId}
               />
             </div>
           )}
@@ -534,7 +653,15 @@ export default function App() {
                   handleSend();
                 }
               }}
-              placeholder={sessionToken ? 'Ask anything…' : 'Add your Groq API key in the sidebar to start…'}
+              placeholder={
+                !sessionToken
+                  ? 'Open the sidebar to configure your Groq API key...'
+                  : ragEnabled
+                  ? `RAG Active (${documents.length} doc${documents.length === 1 ? '' : 's'}) — ask anything about your documents...`
+                  : activeMode === 'tisw'
+                  ? 'TISW Mode Active — ask a follow-up or type "answer normally"...'
+                  : 'Ask anything… (type "use TISW" for structured teaching)'
+              }
               className="input-textarea"
               disabled={isLoading}
             />
@@ -542,9 +669,13 @@ export default function App() {
             <div className="input-controls">
               <button
                 type="button"
-                className="input-icon-btn"
+                className={`input-icon-btn ${documents.length > 0 ? 'input-icon-btn--has-docs' : ''}`}
                 onClick={() => setShowFileZone((prev) => !prev)}
-                title="Attach document"
+                title={
+                  documents.length > 0
+                    ? `${documents.length} document(s) uploaded — click to add more`
+                    : 'Attach PDF, DOCX, or TXT document'
+                }
                 aria-label="Attach document"
               >
                 <Paperclip className="w-4 h-4" />
