@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Omago AI — Intelligent Study & Knowledge Partner</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <!-- Markdown & Code syntax highlighting -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Dynamic Planet Earth Frames Canvas Background -->
+  <div class="earth-bg-container" aria-hidden="true">
+    <canvas id="earth-canvas" class="earth-canvas"></canvas>
+    <div class="earth-vignette-overlay"></div>
+    <div class="radial-glow glow-center"></div>
+  </div>
+
+  <div class="app-wrapper">
+    <!-- Top Navigation Header -->
+    <header class="top-nav">
+      <div class="nav-left">
+        <a href="#" class="brand" id="brand-logo" title="Omago AI Home">
+          <div class="brand-logo-orb">
+            <!-- Omago SVG geometric petal/circle logo -->
+            <svg class="omago-logo-svg" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="50" cy="50" r="46" fill="white" fill-opacity="0.95"/>
+              <path d="M50 14C30.1178 14 14 30.1178 14 50C14 69.8822 30.1178 86 50 86C69.8822 86 86 69.8822 86 50C86 30.1178 69.8822 14 50 14ZM50 26C63.2548 26 74 36.7452 74 50C74 63.2548 63.2548 74 50 74C40.6724 74 32.6127 68.6835 28.6758 60.916C33.1554 62.883 38.3585 64 43.8 64C60.3685 64 73.8 50.5685 73.8 34C73.8 31.1895 73.4132 28.4688 72.6904 25.8887C66.1265 25.9616 60.2743 28.3248 55.7725 32.2275C51.6504 28.3613 46.0967 26 50 26Z" fill="#7c3aed"/>
+              <circle cx="43" cy="45" r="14" fill="#a855f7" fill-opacity="0.85"/>
+            </svg>
+          </div>
+          <span class="brand-name">Omago AI</span>
+        </a>
+      </div>
+
+      <!-- Center Navigation Links -->
+      <nav class="nav-center">
+        <button class="nav-link" data-tab="training">Training Data</button>
+        <button class="nav-link active" data-tab="chat">
+          <svg class="sparkle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+          </svg>
+          <span>Instant Chat</span>
+        </button>
+        <button class="nav-link" data-tab="embed">Embed Chatbot</button>
+        <button class="nav-link" data-tab="leads">Leads</button>
+      </nav>
+
+      <!-- Right Header Pill -->
+      <div class="nav-right">
+        <div class="nav-pill-group">
+          <div class="nav-search-wrapper">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+            <input type="text" id="nav-search-input" placeholder="Search..." autocomplete="off" />
+          </div>
+          <button class="nav-icon-btn" id="notifications-btn" title="Notifications" aria-label="Notifications">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path>
+              <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"></path>
+            </svg>
+            <span class="notification-dot"></span>
+          </button>
+          <div class="user-avatar-wrapper" title="Online: Student Profile">
+            <img src="avatar.jpg" alt="User Profile" class="user-avatar-img" />
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Viewport Area -->
+    <main class="main-content">
+      
+      <!-- TAB 1: INSTANT CHAT (Matching Screenshot) -->
+      <section id="tab-chat" class="tab-view active">
+        
+        <!-- Hero Section (Shown initially or reset) -->
+        <div class="chat-hero-section" id="chat-hero">
+          <div class="hero-center-badge">
+            <svg class="hero-badge-svg" viewBox="0 0 100 100" fill="none">
+              <circle cx="50" cy="50" r="46" fill="white" fill-opacity="0.95"/>
+              <path d="M50 14C30.1178 14 14 30.1178 14 50C14 69.8822 30.1178 86 50 86C69.8822 86 86 69.8822 86 50C86 30.1178 69.8822 14 50 14ZM50 26C63.2548 26 74 36.7452 74 50C74 63.2548 63.2548 74 50 74C40.6724 74 32.6127 68.6835 28.6758 60.916C33.1554 62.883 38.3585 64 43.8 64C60.3685 64 73.8 50.5685 73.8 34C73.8 31.1895 73.4132 28.4688 72.6904 25.8887C66.1265 25.9616 60.2743 28.3248 55.7725 32.2275C51.6504 28.3613 46.0967 26 50 26Z" fill="#8b5cf6"/>
+              <circle cx="43" cy="45" r="14" fill="#c084fc" fill-opacity="0.85"/>
+            </svg>
+          </div>
+          <h1 class="hero-title">Hi, I'm Omago AI</h1>
+          <p class="hero-subtitle">How can I help you today?</p>
+        </div>
+
+        <!-- Chat Stream (Populates when messages exist) -->
+        <div class="chat-messages-container" id="chat-messages" style="display: none;">
+          <!-- Messages will be dynamically rendered here -->
+        </div>
+
+        <!-- Central Frosted Glass Chat Input Box -->
+        <div class="chat-input-wrapper" id="chat-input-wrapper">
+          <div class="glass-input-card">
+            <textarea
+              id="chat-textarea"
+              placeholder="Ask anything..."
+              rows="1"
+              autofocus
+            ></textarea>
+
+            <!-- Attachment chip preview (if file attached) -->
+            <div id="attachment-preview" class="attachment-chip" style="display: none;">
+              <span class="attachment-name">📄 lesson_notes.txt</span>
+              <button class="remove-attach-btn" id="remove-attach-btn">&times;</button>
+            </div>
+
+            <!-- Bottom Toolbar inside input -->
+            <div class="input-card-toolbar">
+              <div class="toolbar-left">
+                <!-- Attach button -->
+                <input type="file" id="file-input-hidden" style="display: none;" accept=".txt,.pdf,.py,.json,.md" />
+                <button class="tool-btn icon-only" id="attach-btn" title="Attach study material or notes">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+                  </svg>
+                </button>
+
+                <!-- Deep search pill -->
+                <button class="tool-pill" id="deep-search-pill" title="Enable deep-search with edge-case and bottleneck exploration">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                  </svg>
+                  <span>Deep search</span>
+                </button>
+
+                <!-- Web Search pill -->
+                <button class="tool-pill" id="web-search-pill" title="Search web context for up-to-date documentation">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="2" y1="12" x2="22" y2="12"></line>
+                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                  </svg>
+                  <span>Search</span>
+                </button>
+              </div>
+
+              <div class="toolbar-right">
+                <!-- Audio / Voice soundwave button -->
+                <button class="tool-btn icon-only" id="voice-btn" title="Speech input / Live audio dictation">
+                  <svg class="audio-wave-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 2v20M17 5v14M7 5v14M2 10v4M22 10v4" />
+                  </svg>
+                </button>
+
+                <!-- Purple Glowing Send Button -->
+                <button class="send-glow-btn" id="send-btn" title="Send query (Enter)">
+                  <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M3.4 20.4l17.45-7.48c.81-.35.81-1.49 0-1.84L3.4 3.6c-.66-.29-1.39.2-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.49-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Quick Action Mode Pills below the input box -->
+          <div class="mode-pills-row">
+            <button class="mode-pill" data-mode="fast">
+              <span class="mode-icon">⚡</span>
+              <span>Fast</span>
+            </button>
+            <button class="mode-pill" data-mode="in-depth">
+              <span class="mode-icon">💡</span>
+              <span>In-depth</span>
+            </button>
+            <button class="mode-pill" data-mode="step-by-step">
+              <span class="mode-icon">🔀</span>
+              <span>Step-by-step</span>
+            </button>
+            <button class="mode-pill" data-mode="holistic">
+              <span class="mode-icon">🧊</span>
+              <span>Holistic</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Thread Management Bar (New Chat / Reset) -->
+        <div class="chat-thread-footer">
+          <button class="footer-btn" id="new-chat-btn">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+            <span>New Chat Session</span>
+          </button>
+          <span class="thread-id-indicator" id="current-thread-display">Thread: Initializing...</span>
+        </div>
+
+      </section>
+
+      <!-- TAB 2: TRAINING DATA & PEDAGOGY -->
+      <section id="tab-training" class="tab-view" style="display: none;">
+        <div class="tab-card glass-panel">
+          <div class="panel-header">
+            <h2>📚 Training Data & Core Pedagogy</h2>
+            <p>Inspect active session preferences, student learning profiles, and the 5 pedagogical pillars.</p>
+          </div>
+
+          <div class="pillars-grid">
+            <div class="pillar-card">
+              <div class="pillar-number">01</div>
+              <h3>The "Why" Before "The What"</h3>
+              <p>Exposes why previous methods fail before introducing any formal jargon or code solution.</p>
+            </div>
+            <div class="pillar-card">
+              <div class="pillar-number">02</div>
+              <h3>First-Principles Derivation</h3>
+              <p>Builds concepts across 4 evolutionary stages: Naive Baseline &rarr; Flaw &rarr; Core Mechanism &rarr; Production Reality.</p>
+            </div>
+            <div class="pillar-card">
+              <div class="pillar-number">03</div>
+              <h3>Two-Stage Examples</h3>
+              <p>Dead-simple Toy Example first to master syntax mechanics, followed immediately by realistic application.</p>
+            </div>
+            <div class="pillar-card">
+              <div class="pillar-number">04</div>
+              <h3>Visual Mental Models</h3>
+              <p>Traces variables and state transitions under the hood with clear ASCII / step-by-step flows.</p>
+            </div>
+          </div>
+
+          <div class="active-preferences-box">
+            <h3>Active In-Memory Session Preferences</h3>
+            <ul id="preferences-list" class="preferences-list">
+              <li><em>No custom preferences registered yet. Tell Omago "From now on, always reply in Hinglish" or "Always keep answers brief" to set one.</em></li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 3: EMBED CHATBOT -->
+      <section id="tab-embed" class="tab-view" style="display: none;">
+        <div class="tab-card glass-panel">
+          <div class="panel-header">
+            <h2>🌐 Embed Omago AI Chatbot</h2>
+            <p>Deploy this personal AI study tutor into your web app, documentation, or LMS portal with 1 line of code.</p>
+          </div>
+
+          <div class="embed-code-container">
+            <label>Embed Script Snippet:</label>
+            <div class="code-box">
+              <pre><code>&lt;!-- Omago AI Chatbot Embed Widget --&gt;
+&lt;script src="http://localhost:8000/embed.js" data-tutor-theme="purple" async&gt;&lt;/script&gt;
+&lt;div id="omago-ai-widget"&gt;&lt;/div&gt;</code></pre>
+              <button class="copy-code-btn" id="copy-embed-btn">Copy Snippet</button>
+            </div>
+          </div>
+
+          <div class="embed-preview-wrapper">
+            <h3>Live Preview</h3>
+            <div class="embed-frame-mock">
+              <div class="mock-header">
+                <span class="mock-dot red"></span>
+                <span class="mock-dot yellow"></span>
+                <span class="mock-dot green"></span>
+                <span class="mock-title">Your Website (https://example.com/learn)</span>
+              </div>
+              <div class="mock-content">
+                <p>Welcome to Computer Science 101. Need assistance? Omago AI is floating in the bottom-right corner.</p>
+                <div class="mock-floating-trigger">
+                  <div class="mock-widget-pill">
+                    <span class="sparkle">✨</span> Ask Omago AI Tutor
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 4: LEADS / INTERACTIONS -->
+      <section id="tab-leads" class="tab-view" style="display: none;">
+        <div class="tab-card glass-panel">
+          <div class="panel-header">
+            <h2>📊 Student Sessions & Inquiries</h2>
+            <p>Track learner queries, conceptual pain points, and engagement analytics.</p>
+          </div>
+
+          <div class="stats-row">
+            <div class="stat-pill">
+              <span class="stat-label">Active Engine</span>
+              <span class="stat-val" id="engine-status">Groq (LangGraph)</span>
+            </div>
+            <div class="stat-pill">
+              <span class="stat-label">Current Thread</span>
+              <span class="stat-val" id="leads-thread-id">-</span>
+            </div>
+            <div class="stat-pill">
+              <span class="stat-label">Queries In Current Session</span>
+              <span class="stat-val" id="queries-counter">0</span>
+            </div>
+          </div>
+
+          <div class="leads-table-wrapper">
+            <table class="leads-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Topic / Query</th>
+                  <th>Mode Used</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="leads-table-body">
+                <tr>
+                  <td colspan="4" style="text-align: center; color: #8e839e; padding: 20px;">No questions asked in this active session yet.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Floating Bottom-Right Circle Launcher (Matching Screenshot) -->
+    <button class="floating-launcher-btn" id="floating-launcher" title="Omago AI Assistant & Shortcuts">
+      <svg class="launcher-logo-svg" viewBox="0 0 100 100" fill="none">
+        <circle cx="50" cy="50" r="46" fill="white"/>
+        <path d="M50 14C30.1178 14 14 30.1178 14 50C14 69.8822 30.1178 86 50 86C69.8822 86 86 69.8822 86 50C86 30.1178 69.8822 14 50 14ZM50 26C63.2548 26 74 36.7452 74 50C74 63.2548 63.2548 74 50 74C40.6724 74 32.6127 68.6835 28.6758 60.916C33.1554 62.883 38.3585 64 43.8 64C60.3685 64 73.8 50.5685 73.8 34C73.8 31.1895 73.4132 28.4688 72.6904 25.8887C66.1265 25.9616 60.2743 28.3248 55.7725 32.2275C51.6504 28.3613 46.0967 26 50 26Z" fill="#121118"/>
+        <circle cx="43" cy="45" r="14" fill="#302b42"/>
+      </svg>
+    </button>
+
+    <!-- Quick Shortcuts / Preferences Modal -->
+    <div class="modal-backdrop" id="shortcuts-modal" style="display: none;">
+      <div class="modal-content glass-panel">
+        <div class="modal-header">
+          <h3>⚡ Omago AI Study Shortcuts</h3>
+          <button class="close-modal-btn" id="close-modal-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p>Quickly prompt the First-Principles Tutor with adaptive commands:</p>
+          <div class="shortcut-chips">
+            <button class="chip-btn" data-prompt="explain briefly">"explain briefly" (TL;DR mode)</button>
+            <button class="chip-btn" data-prompt="go deeper under the hood">"go deeper" (Advanced architecture)</button>
+            <button class="chip-btn" data-prompt="teach me through questions">"teach me through questions" (Socratic)</button>
+            <button class="chip-btn" data-prompt="I don't understand, give me a fresh everyday analogy">"I don't understand" (Fresh analogy)</button>
+            <button class="chip-btn" data-prompt="From now on, explain with Hinglish conversational style">"From now on, use Hinglish"</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
