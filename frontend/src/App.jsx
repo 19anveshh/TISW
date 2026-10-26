@@ -9,6 +9,72 @@ import Toast from './components/Toast';
 import { sendChatMessage, checkHealth } from './lib/api';
 
 // ============================================================================
+// Groq Config Modal — purely local display; key must be set in server .env
+// ============================================================================
+function GroqConfigModal({ onClose }) {
+  const [visible, setVisible] = useState(false);
+
+  return (
+    <div className="groq-modal-backdrop" onClick={onClose}>
+      <div className="groq-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Groq API Key Setup">
+        <div className="groq-modal-header">
+          <span className="groq-modal-title">
+            <span className="groq-badge">G</span>
+            Groq API Key
+          </span>
+          <button className="groq-modal-close" onClick={onClose} aria-label="Close">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="groq-modal-body">
+          <p className="groq-modal-desc">
+            This project uses a <strong>server-side</strong> Groq API key stored in a <code>.env</code> file.
+            The key is never exposed to the browser or committed to GitHub.
+          </p>
+
+          <div className="groq-steps">
+            <div className="groq-step">
+              <span className="groq-step-num">1</span>
+              <span>Get your free key at{' '}
+                <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer" className="groq-link">
+                  console.groq.com/keys
+                </a>
+              </span>
+            </div>
+            <div className="groq-step">
+              <span className="groq-step-num">2</span>
+              <span>Copy <code>.env.example</code> → <code>.env</code> in the project root</span>
+            </div>
+            <div className="groq-step">
+              <span className="groq-step-num">3</span>
+              <span>Paste your key as <code>GROQ_API_KEY=gsk_...</code></span>
+            </div>
+            <div className="groq-step">
+              <span className="groq-step-num">4</span>
+              <span>Restart the backend: <code>uv run python server.py</code></span>
+            </div>
+          </div>
+
+          <div className="groq-env-preview">
+            <span className="groq-env-label">.env</span>
+            <pre className="groq-env-code">{`GROQ_API_KEY=gsk_your_key_here\nGROQ_MODEL=openai/gpt-oss-20b`}</pre>
+          </div>
+
+          <p className="groq-modal-note">
+            ⚠️ Never commit <code>.env</code> to Git. It is already listed in <code>.gitignore</code>.
+          </p>
+        </div>
+
+        <div className="groq-modal-footer">
+          <button className="groq-modal-done" onClick={onClose}>Got it</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
 // TISW — Teaching in a Structured Way
 // Minimal, transparent AI tutoring workspace
 // ============================================================================
@@ -25,6 +91,7 @@ export default function App() {
   const [toastType, setToastType] = useState('info');
   const [backendStatus, setBackendStatus] = useState('connected');
   const [showFileZone, setShowFileZone] = useState(false);
+  const [showGroqModal, setShowGroqModal] = useState(false);
 
   // --- Thread history ---
   const [threads, setThreads] = useState(() => [{
@@ -177,6 +244,22 @@ export default function App() {
           <Plus className="w-4 h-4" />
           <span>New Chat</span>
         </button>
+
+        {/* Groq API Key section */}
+        <div className="groq-config-section">
+          <div className="groq-config-row">
+            <span className="groq-config-badge">G</span>
+            <span className="groq-config-label">Groq AI</span>
+            <button
+              type="button"
+              className="groq-config-btn"
+              onClick={() => setShowGroqModal(true)}
+              title="Configure Groq API Key"
+            >
+              Configure key
+            </button>
+          </div>
+        </div>
 
         {/* Session History List */}
         <div className="sidebar-threads">
@@ -353,6 +436,9 @@ export default function App() {
 
       {/* Global Toast Alerts */}
       <Toast message={toast} type={toastType} />
+
+      {/* Groq API Key Modal */}
+      {showGroqModal && <GroqConfigModal onClose={() => setShowGroqModal(false)} />}
     </div>
   );
 }

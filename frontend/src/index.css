@@ -220,20 +220,21 @@ code, pre, .md-code-block, .md-inline-code {
 .sidebar-brand {
   display: flex;
   flex-direction: column;
+  justify-content: flex-start;
 }
 
 .brand-wordmark {
   font-size: 22px;
   font-weight: 700;
   letter-spacing: -0.02em;
-  color: #ffffff;
+  color: rgba(255, 255, 255, 0.88);
   line-height: 1.1;
 }
 
 .brand-tagline {
   font-size: 11px;
   font-weight: 400;
-  color: rgba(255, 255, 255, 0.45);
+  color: rgba(255, 255, 255, 0.38);
   letter-spacing: 0.02em;
   margin-top: 4px;
 }
@@ -271,11 +272,274 @@ code, pre, .md-code-block, .md-inline-code {
   font-weight: 500;
   cursor: pointer;
   transition: all 0.18s ease;
-  margin-bottom: 24px;
+  margin-bottom: 12px;
 }
 .new-session-btn:hover {
   background: rgba(255, 255, 255, 0.08);
   border-color: rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+}
+
+/* ==========================================================================
+   GROQ CONFIG SIDEBAR SECTION
+   ========================================================================== */
+
+.groq-config-section {
+  margin-bottom: 18px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.groq-config-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.groq-config-badge {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: rgba(249, 115, 22, 0.18);
+  border: 1px solid rgba(249, 115, 22, 0.3);
+  color: rgba(249, 200, 130, 0.9);
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.groq-config-label {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.6);
+  letter-spacing: 0.01em;
+}
+
+.groq-config-btn {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(249, 200, 130, 0.8);
+  background: transparent;
+  border: 1px solid rgba(249, 115, 22, 0.25);
+  border-radius: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.groq-config-btn:hover {
+  background: rgba(249, 115, 22, 0.12);
+  color: rgba(249, 220, 160, 0.95);
+  border-color: rgba(249, 115, 22, 0.4);
+}
+
+/* ==========================================================================
+   GROQ CONFIG MODAL
+   ========================================================================== */
+
+.groq-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding: 20px;
+  animation: fadeIn 0.18s ease-out;
+}
+
+.groq-modal {
+  width: 100%;
+  max-width: 420px;
+  border-radius: 18px;
+  background: rgba(12, 10, 22, 0.88);
+  backdrop-filter: blur(32px) saturate(180%);
+  -webkit-backdrop-filter: blur(32px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+.groq-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.groq-modal-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.groq-badge {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: rgba(249, 115, 22, 0.2);
+  border: 1px solid rgba(249, 115, 22, 0.35);
+  color: rgba(249, 200, 130, 0.95);
+  font-size: 13px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.groq-modal-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.groq-modal-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
+.groq-modal-body {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.groq-modal-desc {
+  font-size: 13px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.7);
+}
+.groq-modal-desc strong {
+  color: rgba(255, 255, 255, 0.9);
+  font-weight: 600;
+}
+.groq-modal-desc code, .groq-modal-body code {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11.5px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(249, 200, 130, 0.9);
+}
+
+.groq-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.groq-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.7);
+  line-height: 1.5;
+}
+
+.groq-step-num {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.groq-env-preview {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.groq-env-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 5px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.groq-env-code {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: rgba(249, 200, 130, 0.85);
+  background: rgba(8, 6, 14, 0.7);
+  padding: 10px 12px;
+  margin: 0;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.groq-modal-note {
+  font-size: 11.5px;
+  color: rgba(255, 255, 255, 0.45);
+  line-height: 1.5;
+}
+
+.groq-link {
+  color: rgba(249, 200, 130, 0.85);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.groq-link:hover {
+  color: rgba(249, 220, 160, 1);
+}
+
+.groq-modal-footer {
+  padding: 12px 20px 18px;
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.groq-modal-done {
+  padding: 8px 22px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.groq-modal-done:hover {
+  background: rgba(255, 255, 255, 0.14);
   color: #ffffff;
 }
 
@@ -405,7 +669,6 @@ code, pre, .md-code-block, .md-inline-code {
   text-align: center;
   user-select: none;
   pointer-events: none;
-  animation: fadeIn 0.6s ease-out;
 }
 
 .hero-wordmark {
