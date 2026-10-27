@@ -18,6 +18,7 @@ import re
 import uuid
 import time
 import threading
+import zipfile
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
 
@@ -32,16 +33,27 @@ from fastembed import TextEmbedding
 # CONFIGURATION CONSTANTS (Easily Tunable)
 # =====================================================================
 
-CHUNK_SIZE_CHARS = 1600       # Approx 400-500 tokens
-CHUNK_OVERLAP_CHARS = 250     # Approx 60-75 tokens
-VECTOR_CANDIDATES = 10        # Candidates from vector similarity
-BM25_CANDIDATES = 10          # Candidates from BM25 keyword search
-VECTOR_WEIGHT = 0.5           # RRF vector weight
-BM25_WEIGHT = 0.5             # RRF BM25 weight
-RRF_K = 60                    # Smoothing constant for Reciprocal Rank Fusion
-FINAL_TOP_K = 6               # Final chunks passed to the LLM
-MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024  # 15 MB limit per file
-MAX_FILES_PER_SESSION = 10    # Max documents per session
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    """Read a positive integer setting without allowing invalid configuration."""
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+CHUNK_SIZE_CHARS = _env_int("RAG_CHUNK_SIZE_CHARS", 1600)       # Approx 400-500 tokens
+CHUNK_OVERLAP_CHARS = min(
+    _env_int("RAG_CHUNK_OVERLAP_CHARS", 250),
+    max(1, CHUNK_SIZE_CHARS - 1),
+)                                                               # Approx 60-75 tokens
+VECTOR_CANDIDATES = _env_int("RAG_VECTOR_CANDIDATES", 10)      # Candidates from vector similarity
+BM25_CANDIDATES = _env_int("RAG_BM25_CANDIDATES", 10)          # Candidates from BM25 keyword search
+VECTOR_WEIGHT = 0.5                                             # RRF vector weight
+BM25_WEIGHT = 0.5                                               # RRF BM25 weight
+RRF_K = _env_int("RAG_RRF_K", 60)                               # RRF smoothing constant
+FINAL_TOP_K = _env_int("RAG_FINAL_TOP_K", 6)                    # Final chunks passed to the LLM
+MAX_FILE_SIZE_BYTES = _env_int("RAG_MAX_FILE_SIZE_BYTES", 15 * 1024 * 1024)  # 15 MB
+MAX_FILES_PER_SESSION = _env_int("RAG_MAX_FILES_PER_SESSION", 10)             # Max documents
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt"}
 
 
@@ -118,6 +130,26 @@ def tokenize_for_bm25(text: str) -> List[str]:
     return re.findall(r"\w+", text.lower())
 
 
+def validate_file_content(filename: str, file_bytes: bytes) -> None:
+    """Validate basic file signatures before invoking format-specific parsers."""
+    ext = os.path.splitext(filename)[1].lower()
+    if not file_bytes or not file_bytes.strip():
+        raise ValueError(f"File '{filename}' is empty.")
+    if len(file_bytes) > MAX_FILE_SIZE_BYTES:
+        size_mb = round(len(file_bytes) / (1024 * 1024), 1)
+        raise ValueError(
+            f"File size ({size_mb} MB) exceeds maximum allowed size "
+            f"({MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB)."
+        )
+
+    if ext == ".pdf" and not file_bytes.lstrip().startswith(b"%PDF"):
+        raise ValueError(f"File '{filename}' is not a valid PDF.")
+    if ext == ".docx" and not zipfile.is_zipfile(io.BytesIO(file_bytes)):
+        raise ValueError(f"File '{filename}' is not a valid DOCX document.")
+    if ext == ".txt" and b"\x00" in file_bytes:
+        raise ValueError(f"File '{filename}' contains binary data and is not a valid text file.")
+
+
 def extract_text_from_file(filename: str, file_bytes: bytes) -> List[Tuple[str, Optional[int]]]:
     """
     Extracts text from supported document formats.
@@ -129,8 +161,7 @@ def extract_text_from_file(filename: str, file_bytes: bytes) -> List[Tuple[str, 
             f"Unsupported file type '{ext}'. Supported formats are: {', '.join(sorted(SUPPORTED_EXTENSIONS))}."
         )
 
-    if not file_bytes or len(file_bytes.strip()) == 0:
-        raise ValueError(f"File '{filename}' is empty.")
+    validate_file_content(filename, file_bytes)
 
     extracted_sections: List[Tuple[str, Optional[int]]] = []
 
@@ -193,6 +224,9 @@ def chunk_document(
     chunks: List[DocumentChunk] = []
     chunk_global_idx = 0
 
+    if chunk_size < 1 or overlap < 0 or overlap >= chunk_size:
+        raise ValueError("chunk_size must be positive and overlap must be smaller than chunk_size.")
+
     for section_text, page_num in sections:
         # Split section into logical paragraphs
         paragraphs = [p.strip() for p in section_text.split("\n\n") if p.strip()]
@@ -210,6 +244,40 @@ def chunk_document(
                 sub_parts = [s.strip() for s in re.split(r"(?<=[.!?])\s+", para) if s.strip()]
                 if not sub_parts:
                     sub_parts = [para[i:i + chunk_size] for i in range(0, para_len, chunk_size - overlap)]
+
+                # A single sentence can still exceed the target size. Split only
+                # that sentence by words (and finally by characters for very long
+                # identifiers) so chunks never grow without bound.
+                normalized_parts: List[str] = []
+                for sub in sub_parts:
+                    if len(sub) <= chunk_size:
+                        normalized_parts.append(sub)
+                        continue
+                    words = sub.split()
+                    current_words: List[str] = []
+                    current_words_len = 0
+                    for word in words:
+                        if len(word) > chunk_size:
+                            if current_words:
+                                normalized_parts.append(" ".join(current_words))
+                                current_words = []
+                                current_words_len = 0
+                            normalized_parts.extend(
+                                word[i:i + chunk_size]
+                                for i in range(0, len(word), chunk_size)
+                            )
+                            continue
+                        proposed_len = current_words_len + len(word) + (1 if current_words else 0)
+                        if proposed_len > chunk_size and current_words:
+                            normalized_parts.append(" ".join(current_words))
+                            current_words = [word]
+                            current_words_len = len(word)
+                        else:
+                            current_words.append(word)
+                            current_words_len = proposed_len
+                    if current_words:
+                        normalized_parts.append(" ".join(current_words))
+                sub_parts = normalized_parts
 
                 for sub in sub_parts:
                     if current_length + len(sub) > chunk_size and current_chunk_parts:
@@ -451,31 +519,45 @@ class SessionDocumentIndex:
                 bm25_results = []
 
             # ── 3. Weighted Reciprocal Rank Fusion (RRF) ───────────────────────
-            # RRF_score(chunk) = vector_weight / (k + rank_v) + bm25_weight / (k + rank_b)
-            # Ranks are 1-indexed. Missing ranks contribute 0.0.
-            chunk_map: Dict[str, DocumentChunk] = {}
-            rrf_scores: Dict[str, float] = {}
-
-            for rank, chunk in enumerate(vector_results, start=1):
-                cid = chunk.chunk_id
-                chunk_map[cid] = chunk
-                rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (vector_weight / (rrf_k + rank))
-
-            for rank, chunk in enumerate(bm25_results, start=1):
-                cid = chunk.chunk_id
-                chunk_map[cid] = chunk
-                rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (bm25_weight / (rrf_k + rank))
-
-            # Sort fused results by score descending
-            sorted_chunk_ids = sorted(
-                rrf_scores.keys(),
-                key=lambda cid: rrf_scores[cid],
-                reverse=True,
+            fused = weighted_rrf(
+                vector_results,
+                bm25_results,
+                semantic_weight=vector_weight,
+                keyword_weight=bm25_weight,
+                rrf_k=rrf_k,
             )
 
             # ── 4. Select Final Top-K ─────────────────────────────────────────
-            selected_chunks = [chunk_map[cid] for cid in sorted_chunk_ids[:final_top_k]]
-            return selected_chunks
+            return [chunk for chunk, _score in fused[:final_top_k]]
+
+
+def weighted_rrf(
+    semantic_results: List[DocumentChunk],
+    keyword_results: List[DocumentChunk],
+    *,
+    semantic_weight: float = VECTOR_WEIGHT,
+    keyword_weight: float = BM25_WEIGHT,
+    rrf_k: int = RRF_K,
+) -> List[Tuple[DocumentChunk, float]]:
+    """Fuse two ranked chunk lists with weighted, 1-indexed RRF.
+
+    A stable chunk ID makes duplicates from the two retrievers collapse into
+    one result while preserving the first encountered chunk metadata.
+    """
+    if rrf_k < 1:
+        raise ValueError("rrf_k must be positive.")
+
+    chunk_map: Dict[str, DocumentChunk] = {}
+    scores: Dict[str, float] = {}
+    for rank, chunk in enumerate(semantic_results, start=1):
+        chunk_map.setdefault(chunk.chunk_id, chunk)
+        scores[chunk.chunk_id] = scores.get(chunk.chunk_id, 0.0) + semantic_weight / (rrf_k + rank)
+    for rank, chunk in enumerate(keyword_results, start=1):
+        chunk_map.setdefault(chunk.chunk_id, chunk)
+        scores[chunk.chunk_id] = scores.get(chunk.chunk_id, 0.0) + keyword_weight / (rrf_k + rank)
+
+    ordered_ids = sorted(scores, key=lambda chunk_id: scores[chunk_id], reverse=True)
+    return [(chunk_map[chunk_id], scores[chunk_id]) for chunk_id in ordered_ids]
 
 
 # =====================================================================
@@ -488,7 +570,9 @@ _session_indexes: Dict[str, SessionDocumentIndex] = {}
 
 def get_session_document_index(session_id: str) -> SessionDocumentIndex:
     """Returns or creates the isolated SessionDocumentIndex for the given session_id."""
-    clean_id = (session_id or "default-session").strip()
+    clean_id = (session_id or "").strip()
+    if not clean_id:
+        raise ValueError("A server-issued session ID is required for document indexing.")
     with _registry_lock:
         if clean_id not in _session_indexes:
             _session_indexes[clean_id] = SessionDocumentIndex(clean_id)

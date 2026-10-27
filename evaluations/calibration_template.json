@@ -1,0 +1,47 @@
+{
+  "version": "judge-calibration-1.0.0",
+  "status": "pending_manual_labels",
+  "instructions": "Replace the placeholder cases with a manually reviewed sample before running judge calibration. Do not treat placeholder labels as measurements.",
+  "cases": [
+    {
+      "id": "CAL-001",
+      "question": "Explain recursion to a beginner.",
+      "answer": "<paste a real anonymized answer>",
+      "human_scores": {},
+      "reviewer_id": "<blinded-reviewer>",
+      "notes": "Score with evaluations/rubrics.py; record evidence for every score."
+    },
+    {
+      "id": "CAL-002",
+      "question": "Debug an index-out-of-range error.",
+      "answer": "<paste a real anonymized answer>",
+      "human_scores": {},
+      "reviewer_id": "<blinded-reviewer>",
+      "notes": "Include whether the stated cause and fix are actually correct."
+    },
+    {
+      "id": "CAL-003",
+      "question": "Explain correlation versus causation.",
+      "answer": "<paste a real anonymized answer>",
+      "human_scores": {},
+      "reviewer_id": "<blinded-reviewer>",
+      "notes": "Do not reward an analogy unless it is accurate and useful."
+    },
+    {
+      "id": "CAL-004",
+      "question": "Answer a question whose evidence is insufficient.",
+      "answer": "<paste a real anonymized answer>",
+      "human_scores": {},
+      "reviewer_id": "<blinded-reviewer>",
+      "notes": "Focus on uncertainty and unsupported-claim avoidance."
+    },
+    {
+      "id": "CAL-005",
+      "question": "Answer from an uploaded document with missing evidence.",
+      "answer": "<paste a real anonymized answer>",
+      "human_scores": {},
+      "reviewer_id": "<blinded-reviewer>",
+      "notes": "Check faithfulness, citation accuracy, and honest evidence limits."
+    }
+  ]
+}

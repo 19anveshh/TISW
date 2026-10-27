@@ -1,16 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { FileText, Trash2, Database, Plus, RefreshCw, X } from '../icons';
+import { FileText, Trash2, Database, Plus, RefreshCw } from '../icons';
 import { fetchDocuments, deleteDocument, uploadFile } from '../lib/api';
 
 /**
  * DocumentManager — Sidebar section for toggling RAG and managing uploaded documents.
- * Strict per-session isolation via sessionToken or clientSessionId.
+ * Strict per-session isolation via a server-issued sessionToken.
  */
 export default function DocumentManager({
   ragEnabled,
   onToggleRag,
   sessionToken,
-  clientSessionId,
   onToast,
   documents,
   setDocuments,
@@ -22,9 +21,13 @@ export default function DocumentManager({
 
   // Load documents when session changes
   const loadDocs = useCallback(async () => {
+    if (!sessionToken) {
+      setDocuments([]);
+      return;
+    }
     try {
       setLoading(true);
-      const data = await fetchDocuments(sessionToken, clientSessionId);
+      const data = await fetchDocuments(sessionToken);
       setDocuments(data.documents || []);
     } catch (err) {
       // Don't show loud error on initial load if backend is booting
@@ -32,7 +35,7 @@ export default function DocumentManager({
     } finally {
       setLoading(false);
     }
-  }, [sessionToken, clientSessionId, setDocuments]);
+  }, [sessionToken, setDocuments]);
 
   useEffect(() => {
     loadDocs();
@@ -41,6 +44,10 @@ export default function DocumentManager({
   // Handle single file upload
   const handleUpload = async (file) => {
     if (!file) return;
+    if (!sessionToken) {
+      onToast?.('Configure a Groq API key before uploading documents.', 'error');
+      return;
+    }
 
     const ext = '.' + (file.name.split('.').pop() || '').toLowerCase();
     if (!['.pdf', '.docx', '.txt'].includes(ext)) {
@@ -50,7 +57,7 @@ export default function DocumentManager({
 
     setUploading(true);
     try {
-      const res = await uploadFile(file, sessionToken, clientSessionId);
+      const res = await uploadFile(file, sessionToken);
       onToast?.(`Uploaded ${file.name} (${res.chunk_count} chunks indexed)`, 'success');
       // Automatically enable RAG if not already on
       if (!ragEnabled) {
@@ -74,7 +81,7 @@ export default function DocumentManager({
 
   const handleDelete = async (docId, filename) => {
     try {
-      await deleteDocument(docId, sessionToken, clientSessionId);
+      await deleteDocument(docId, sessionToken);
       setDocuments((prev) => prev.filter((d) => d.doc_id !== docId));
       onToast?.(`Removed "${filename}"`, 'info');
     } catch (err) {
@@ -133,7 +140,7 @@ export default function DocumentManager({
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={(e) => { e.preventDefault(); setDragOver(false); }}
           onDrop={handleDrop}
-          onClick={() => !uploading && fileInputRef.current?.click()}
+          onClick={() => !uploading && sessionToken && fileInputRef.current?.click()}
         >
           <input
             ref={fileInputRef}
@@ -155,7 +162,9 @@ export default function DocumentManager({
           ) : (
             <div className="doc-upload-inner">
               <Plus className="w-3.5 h-3.5 text-cyan" />
-              <span className="doc-upload-text">Add PDF, DOCX, or TXT</span>
+              <span className="doc-upload-text">
+                {sessionToken ? 'Add PDF, DOCX, or TXT' : 'Configure Groq key to upload'}
+              </span>
             </div>
           )}
         </div>

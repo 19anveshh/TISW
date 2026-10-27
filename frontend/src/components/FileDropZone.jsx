@@ -10,36 +10,17 @@ export default function FileDropZone({
   onUploadError,
   disabled,
   sessionToken,
-  clientSessionId,
 }) {
   const [isDragOver, setIsDragOver] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadedFile, setUploadedFile] = useState(null);
 
-  const handleDrop = useCallback(async (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(false);
-
-    const file = e.dataTransfer?.files?.[0];
-    if (!file) return;
-
-    await processFile(file);
-  }, [sessionToken, clientSessionId]);
-
-  const handleFileSelect = useCallback(async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    await processFile(file);
-    e.target.value = '';
-  }, [sessionToken, clientSessionId]);
-
-  const processFile = async (file) => {
+  const processFile = useCallback(async (file) => {
     setIsUploading(true);
     setUploadedFile(null);
 
     try {
-      const result = await uploadFile(file, sessionToken, clientSessionId);
+      const result = await uploadFile(file, sessionToken);
       setUploadedFile({ name: file.name, size: result.size_kb, chunks: result.chunk_count });
       onUploadSuccess?.(result);
     } catch (err) {
@@ -47,7 +28,22 @@ export default function FileDropZone({
     } finally {
       setIsUploading(false);
     }
-  };
+  }, [onUploadError, onUploadSuccess, sessionToken]);
+
+  const handleDrop = useCallback(async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+
+    const file = e.dataTransfer?.files?.[0];
+    if (file) await processFile(file);
+  }, [processFile]);
+
+  const handleFileSelect = useCallback(async (e) => {
+    const file = e.target.files?.[0];
+    if (file) await processFile(file);
+    e.target.value = '';
+  }, [processFile]);
 
   return (
     <div

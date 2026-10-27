@@ -711,6 +711,45 @@ code, pre, .md-code-block, .md-inline-code {
   gap: 12px;
 }
 
+.tracing-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.045);
+  color: rgba(255, 255, 255, 0.72);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  white-space: nowrap;
+}
+.tracing-toggle:hover:not(:disabled) {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+.tracing-toggle--on {
+  color: #d9f99d;
+  background: rgba(132, 204, 22, 0.14);
+  border-color: rgba(163, 230, 53, 0.42);
+  box-shadow: 0 0 18px rgba(132, 204, 22, 0.14);
+}
+.tracing-toggle--unavailable,
+.tracing-toggle:disabled {
+  color: rgba(255, 255, 255, 0.4);
+  background: rgba(255, 255, 255, 0.025);
+  border-color: rgba(255, 255, 255, 0.08);
+  cursor: not-allowed;
+}
+.tracing-toggle--unavailable svg {
+  opacity: 0.65;
+}
+
 .nav-btn-ghost {
   background: transparent;
   border: 1px solid transparent;
@@ -970,6 +1009,21 @@ code, pre, .md-code-block, .md-inline-code {
   border-color: rgba(239, 68, 68, 0.3);
 }
 
+.message-retry-btn {
+  margin-top: 12px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.message-retry-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
 .assistant-header {
   display: flex;
   align-items: center;
@@ -1005,6 +1059,21 @@ code, pre, .md-code-block, .md-inline-code {
   gap: 8px;
   font-size: 13px;
   color: rgba(255, 255, 255, 0.55);
+}
+
+.streaming-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 1.05em;
+  margin-left: 3px;
+  vertical-align: -0.15em;
+  border-radius: 2px;
+  background: #c084fc;
+  animation: streamingCursorBlink 0.9s steps(2, start) infinite;
+}
+
+@keyframes streamingCursorBlink {
+  50% { opacity: 0.25; }
 }
 
 /* ==========================================================================
@@ -1129,6 +1198,9 @@ code, pre, .md-code-block, .md-inline-code {
   opacity: 0.35;
   cursor: not-allowed;
   box-shadow: none;
+}
+.send-btn--stop {
+  background: rgba(239, 68, 68, 0.8);
 }
 
 /* ==========================================================================
@@ -1385,6 +1457,12 @@ code, pre, .md-code-block, .md-inline-code {
   .top-header {
     padding: 0 18px;
     height: 64px;
+  }
+  .tracing-toggle {
+    padding: 7px 9px;
+  }
+  .tracing-toggle span {
+    display: none;
   }
   .hero-floating-card {
     display: none;

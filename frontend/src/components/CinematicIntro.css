@@ -1,0 +1,178 @@
+/* Cinematic identity reveal. The application remains unchanged underneath. */
+
+.app-root--intro-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-root--intro-revealed {
+  opacity: 1;
+}
+
+.app-root--intro-transition {
+  transition: opacity 900ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.app-root--intro-transition .brand-logo-text {
+  visibility: hidden;
+}
+
+.cinematic-intro {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  overflow: hidden;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000000;
+  color: #ffffff;
+  pointer-events: auto;
+  transition: background 1100ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.cinematic-intro--travel {
+  background: rgba(0, 0, 0, 0.42);
+}
+
+.cinematic-intro__words {
+  position: absolute;
+  inset: 0;
+  font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.cinematic-word {
+  position: absolute;
+  display: inline-block;
+  white-space: nowrap;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  transform: translateY(12px);
+  opacity: 0;
+  user-select: none;
+}
+
+.cinematic-word--core {
+  font-weight: 600;
+  color: rgba(255, 255, 255, var(--word-opacity));
+}
+
+.cinematic-word--atmosphere {
+  font-weight: 450;
+  letter-spacing: -0.02em;
+  color: rgba(255, 255, 255, var(--word-opacity));
+}
+
+.cinematic-intro--words .cinematic-word {
+  animation: cinematicWordIn 820ms cubic-bezier(0.16, 1, 0.3, 1) var(--word-delay) forwards;
+}
+
+.cinematic-rest {
+  transition: opacity 560ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.cinematic-initial {
+  display: inline-block;
+  position: relative;
+  transform-origin: 0 0;
+  will-change: transform;
+  transition: transform 1000ms cubic-bezier(0.16, 1, 0.3, 1), color 500ms ease;
+}
+
+.cinematic-intro--converge .cinematic-word {
+  opacity: var(--word-opacity);
+  transform: translateY(0);
+}
+
+.cinematic-intro--converge .cinematic-word--core,
+.cinematic-intro--formation .cinematic-word--core {
+  opacity: var(--word-opacity);
+  transform: var(--converge-transform);
+  transition: transform 1180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.cinematic-intro--travel .cinematic-word--core {
+  opacity: 1;
+  color: #ffffff;
+  transform: var(--converge-transform);
+  transition: transform 1180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.cinematic-intro--formation .cinematic-word--atmosphere {
+  opacity: 0;
+  transform: translateY(-10px);
+  transition: opacity 620ms ease, transform 900ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.cinematic-intro--formation .cinematic-word--core .cinematic-rest {
+  opacity: 0;
+}
+
+.cinematic-intro--travel .cinematic-word--core .cinematic-rest,
+.cinematic-intro--travel .cinematic-word--atmosphere {
+  opacity: 0;
+}
+
+.cinematic-intro--formation .cinematic-word--core {
+  color: #ffffff;
+}
+
+.cinematic-intro--formation .cinematic-initial,
+.cinematic-intro--travel .cinematic-initial {
+  z-index: 2;
+  font-size: inherit;
+  font-weight: 700;
+  letter-spacing: -0.08em;
+  text-transform: uppercase;
+  color: #ffffff;
+}
+
+.cinematic-intro--travel .cinematic-initial {
+  transition-duration: 1150ms;
+  transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.cinematic-intro__grain {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.26;
+  background:
+    radial-gradient(circle at 50% 45%, rgba(255, 255, 255, 0.045), transparent 34%),
+    radial-gradient(circle at 50% 50%, transparent 45%, rgba(0, 0, 0, 0.68) 100%);
+}
+
+@keyframes cinematicWordIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 700px) {
+  .cinematic-word {
+    letter-spacing: -0.055em;
+  }
+
+  .cinematic-word--atmosphere {
+    letter-spacing: -0.03em;
+  }
+
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cinematic-intro {
+    display: none;
+  }
+
+  .app-root--intro-hidden,
+  .app-root--intro-revealed {
+    opacity: 1;
+  }
+}

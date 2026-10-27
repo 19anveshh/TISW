@@ -140,6 +140,7 @@ export const HelpCircle = createIcon([
 
 export const ChevronDown = createIcon("m6 9 6 6 6-6");
 export const ArrowUpRight = createIcon(["M7 17L17 7", "M7 7h10v10"]);
+export const Activity = createIcon(["M3 12h4l3-8 4 16 3-8h4"]);
 
 export const FileText = createIcon([
   "M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z",

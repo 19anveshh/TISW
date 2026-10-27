@@ -9,17 +9,26 @@ Supports two distinct response modes:
 """
 
 import os
+import re
 import sys
 import uuid
-from typing import Annotated, List, Optional
+from typing import Annotated, Any, List, Optional
 from typing_extensions import TypedDict
 
 from dotenv import load_dotenv
-from langchain_core.messages import AnyMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_groq import ChatGroq
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import START, END, StateGraph
 from langgraph.graph.message import add_messages
+from runtime_config import configure_runtime, is_offline_mode
+
+
+# Apply tracing policy before any graph is constructed. The evaluator sets
+# TISW_OFFLINE before importing this module for local runs.
+load_dotenv()
+RUNTIME_CONFIG = configure_runtime()
 
 
 # =====================================================================
@@ -56,28 +65,34 @@ You are currently operating in NORMAL MODE (the default mode for every user).
 """
 
 TISW_MODE_PROMPT = """# IDENTITY & PURPOSE
-You are TISW AI, operating in TISW MODE (Teaching in a Structured Way).
-The student has explicitly requested the TISW structured teaching method.
+You are TISW AI. The student explicitly requested the internal TISW (Teaching in a Structured Way) teaching methodology for this conversation. Apply it naturally without announcing an internal mode or forcing a visible template.
 
-Your goal is to build deep, rock-solid conceptual understanding from the ground up, using intuition and first principles.
+# TEACHING PRINCIPLE
+Help the learner understand the idea before introducing unfamiliar terminology. Then connect that intuition to the accurate real concept and help the learner explore it deeply.
 
-# CORE METHODOLOGY (TISW MODE):
-Structure the explanation so the student deeply understands the "Why", the "What", and the "How".
-Depending on the topic, select and include the sections that genuinely help explain it:
+# HOW TO TEACH
+- Start with a familiar idea, observation, or small example when it genuinely clarifies the topic. Use an analogy only when it is accurate and useful; never force a misleading analogy.
+- Introduce the correct technical or academic vocabulary naturally after the learner has enough context. Define unfamiliar terms in plain English instead of stacking unexplained definitions.
+- Explain not only what something is, but why it exists, what problem it solves, how it works, why it works that way, when it is useful, its limitations, and meaningful alternatives when relevant.
+- Move naturally through the layers that help this particular question: basic intuition, the real concept, mechanism, reasoning, examples or applications, and deeper details. Do not force every layer into a simple answer or make every response long.
+- Use simple, natural English by default. Be suitable for a beginner, including a 12-year-old, without sacrificing accuracy or becoming condescending. If the learner shows prior knowledge, skip repeated basics and go deeper.
+- When appropriate, ask one short prediction, checking question, or practical exercise and use the response to correct misunderstandings. Do not turn every answer into a quiz.
 
-1. The Core Idea: Explain the concept simply in plain, everyday words ("In a nutshell...").
-2. Intuitive Example / Analogy: Use a relatable everyday scenario (such as cricket, UPI, college life, or daily activities) to make the mechanics click immediately before introducing heavy jargon.
-3. Step-by-Step Explanation: Walk through the mechanism or logic in clear, sequential steps.
-4. Why it Works (Under the Hood): Explain what is happening behind the scenes or why this approach was created.
-5. Practical Example or Code: Provide a clean, minimal code snippet or practical calculation with clear comments.
-6. Short Recap: Summarize the essential takeaway in 1–2 crisp sentences.
+# CODING AND TECHNICAL TOPICS
+- Establish the problem and intended outcome before presenting a large code block.
+- Build solutions in small, meaningful, runnable steps. For important lines or blocks, explain what they do, why they belong there, how they connect to the previous step, and what would change if they were removed or modified.
+- Explain important errors and debugging decisions. Mention alternative approaches and trade-offs when they matter, while distinguishing requirements from optional preferences.
+- Avoid mechanically explaining every character when the learner does not need that level of detail.
 
-# IMPORTANT GUIDELINES FOR TISW MODE:
-- These sections are GUIDELINES, not rigid mandatory checkboxes. Adapt the structure naturally to the topic. Do not make the answer unnecessarily bloated.
-- Language: Keep English simple, clear, and easy to follow for Indian students. Avoid pompous or overly academic words. Explain technical terms immediately.
-- Explaining Code: Decompose the logic before writing code, build from the simplest working version, and explain trade-offs.
-- Maintain technical rigor while keeping the tone warm, humble, and supportive—like a great mentor sitting right next to the student.
-- If the student says "Now answer normally" or "Switch to normal mode", gracefully return to direct, unformatted Normal Mode.
+# SUBJECT ADAPTATION
+- Science: connect observations to the underlying principle.
+- Mathematics: build intuition with examples before formulas when appropriate.
+- History: connect causes, context, events, and consequences.
+- Economics: use familiar decisions and real-life situations.
+- AI and technology: explain the basic idea before technical mechanisms.
+- Reading and theory: unpack difficult passages and connect details to the author's larger argument.
+
+Remain technically honest, acknowledge uncertainty, and adapt depth to the learner's question. The user can explicitly switch back to normal chat; after that, use the normal response style.
 """
 
 # Alias for backwards compatibility
@@ -88,89 +103,60 @@ TEACHING_METHODOLOGY_PROMPT = TISW_MODE_PROMPT
 # 2. INTELLIGENT MODE DETECTION
 # =====================================================================
 
+def detect_mode_command(user_text: str) -> Optional[str]:
+    """Recognize explicit TISW activation/deactivation requests only.
+
+    The matcher intentionally requires an imperative/request shape around the
+    acronym. This keeps incidental questions such as "What does TISW stand for?"
+    and comparisons with normal chat in the default mode.
+    """
+    normalized = re.sub(r"[^a-z0-9\s]", " ", (user_text or "").lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return None
+
+    deactivate_patterns = (
+        r"^(?:please\s+)?stop\s+using\s+tisw\b",
+        r"^(?:please\s+)?disable\s+tisw\b",
+        r"^(?:please\s+)?(?:turn\s+off|switch\s+off)\s+tisw\b",
+        r"^(?:please\s+)?switch\s+back\s+to\s+normal(?:\s+(?:chat|mode))?\b",
+        r"^(?:please\s+)?switch\s+to\s+normal(?:\s+(?:chat|mode))?\b",
+        r"^(?:please\s+)?(?:answer|respond|reply)\s+normally\b",
+        r"^(?:please\s+)?use\s+normal(?:\s+(?:chat|mode))?\b",
+    )
+    if any(re.match(pattern, normalized) for pattern in deactivate_patterns):
+        return "deactivate"
+
+    activate_patterns = (
+        r"^(?:please\s+)?(?:only\s+)?use\s+tisw\b",
+        r"^(?:can|could|would)\s+you\s+use\s+tisw\b",
+        r"^let(?:s|\s+s)\s+use\s+tisw\b",
+        r"^(?:continue|keep)\s+using\s+tisw\b",
+        r"^(?:from\s+now\s+on\s+)?always\s+use\s+tisw\b",
+        r"^from\s+now\s+on\s+use\s+tisw\b",
+        r"^(?:please\s+)?(?:switch\s+to|activate|enable|turn\s+on)\s+tisw\b",
+        r"^(?:please\s+)?(?:apply|follow)\s+(?:the\s+)?tisw\b",
+        r"^(?:can|could|would)\s+you\s+(?:apply|follow)\s+(?:the\s+)?tisw\b",
+    )
+    if any(re.match(pattern, normalized) for pattern in activate_patterns):
+        return "activate"
+
+    if re.match(
+        r"^(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?(?:explain|teach|answer|respond|reply)\b.*\b(?:using|with)\s+tisw\b",
+        normalized,
+    ):
+        return "activate"
+
+    return None
+
+
 def detect_mode_request(user_text: str, current_mode: str = "normal") -> str:
-    """
-    Intelligently determines whether the student wants 'normal' or 'tisw' mode.
-
-    NORMAL MODE: Default. Direct, natural, simple answers without forced templates.
-    TISW MODE: Activated only when user explicitly asks for TISW / structured teaching.
-
-    Returns:
-        'normal' | 'tisw'
-    """
-    if not user_text:
-        return current_mode or "normal"
-
-    lowered = user_text.lower().strip()
-
-    # Informational queries ABOUT TISW itself should be answered in Normal Mode
-    info_tisw_queries = (
-        "what is tisw",
-        "what does tisw stand for",
-        "what does tisw mean",
-        "who is tisw",
-        "tell me about tisw",
-        "about tisw",
-    )
-    if any(q in lowered for q in info_tisw_queries):
-        return current_mode or "normal"
-
-    # 1. Check for explicit switch back to Normal Mode first
-    normal_triggers = (
-        "answer normally",
-        "explain normally",
-        "normal mode",
-        "switch to normal",
-        "back to normal",
-        "reply normally",
-        "respond normally",
-        "regular mode",
-        "regular answer",
-        "direct answer",
-        "simple answer",
-        "standard mode",
-        "just answer",
-        "no tisw",
-        "stop tisw",
-        "stop using tisw",
-        "without tisw",
-        "don't use tisw",
-        "dont use tisw",
-        "do not use tisw",
-        "speak normally",
-        "talk normally",
-    )
-    if any(trigger in lowered for trigger in normal_triggers):
-        return "normal"
-
-    # 2. Check for explicit request for TISW Mode
-    tisw_triggers = (
-        "tisw",
-        "teaching in a structured way",
-        "structured teaching",
-        "structured method",
-        "structured approach",
-        "structured way",
-        "tisw method",
-        "tisw approach",
-        "using tisw",
-        "with tisw",
-        "in tisw",
-        "tisw mode",
-        "use tisw",
-        "explain using tisw",
-        "teach me using your method",
-        "teach using your method",
-        "explain using your method",
-        "use your method",
-        "use your structured method",
-        "first principles using tisw",
-        "teach me from first principles",
-    )
-    if any(trigger in lowered for trigger in tisw_triggers):
+    """Apply an explicit mode command, otherwise preserve thread state."""
+    command = detect_mode_command(user_text)
+    if command == "activate":
         return "tisw"
-
-    # 3. Inherit active mode for follow-ups in the active conversation
+    if command == "deactivate":
+        return "normal"
     return current_mode or "normal"
 
 
@@ -248,6 +234,72 @@ class TutorState(TypedDict, total=False):
     rag_context: Optional[str]
 
 
+def _prepare_tutor_turn(state: TutorState) -> dict[str, Any]:
+    """Prepare one turn for both synchronous and native streaming graphs."""
+    messages: List[BaseMessage] = state.get("messages", [])
+    current_prefs: List[str] = list(state.get("session_preferences") or [])
+    current_mode: str = state.get("active_mode") or "normal"
+    rag_context: Optional[str] = state.get("rag_context")
+    mode_command: Optional[str] = None
+
+    if messages and isinstance(messages[-1], HumanMessage):
+        latest_text = str(messages[-1].content)
+        mode_command = detect_mode_command(latest_text)
+        if not mode_command:
+            new_pref = detect_persistent_preference(latest_text)
+            if new_pref and new_pref not in current_prefs:
+                current_prefs.append(new_pref)
+        current_mode = detect_mode_request(latest_text, current_mode)
+
+    if mode_command:
+        return {
+            "session_preferences": current_prefs,
+            "active_mode": current_mode,
+            "rag_context": rag_context,
+            "mode_command": mode_command,
+            "model_input": None,
+        }
+
+    system_msg = build_system_message(current_mode, current_prefs, rag_context)
+    return {
+        "session_preferences": current_prefs,
+        "active_mode": current_mode,
+        "rag_context": rag_context,
+        "mode_command": None,
+        "model_input": [system_msg] + messages,
+    }
+
+
+def _tutor_state_update(prepared: dict[str, Any], response: Optional[BaseMessage] = None) -> dict[str, Any]:
+    update: dict[str, Any] = {
+        "session_preferences": prepared["session_preferences"],
+        "active_mode": prepared["active_mode"],
+        "rag_context": prepared["rag_context"],
+    }
+    if response is not None:
+        update["messages"] = [response]
+    return update
+
+
+def _message_chunk_text(chunk: Any) -> str:
+    """Return only user-visible text from a streamed model chunk."""
+    content = getattr(chunk, "content", chunk if isinstance(chunk, str) else "")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+
+    text_parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            text_parts.append(block)
+        elif isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
+            text = block.get("text") or block.get("content")
+            if isinstance(text, str):
+                text_parts.append(text)
+    return "".join(text_parts)
+
+
 def create_tutor_graph(llm: ChatGroq, checkpointer: InMemorySaver):
     """
     Builds and compiles the LangGraph workflow with a single `tutor` node
@@ -255,41 +307,43 @@ def create_tutor_graph(llm: ChatGroq, checkpointer: InMemorySaver):
     """
 
     def tutor_node(state: TutorState) -> dict:
-        messages: List[BaseMessage] = state.get("messages", [])
-        current_prefs: List[str] = list(state.get("session_preferences") or [])
-        current_mode: str = state.get("active_mode") or "normal"
-        rag_context: Optional[str] = state.get("rag_context")
-
-        # Check if latest user message establishes a preference or changes mode
-        if messages and isinstance(messages[-1], HumanMessage):
-            latest_text = str(messages[-1].content)
-
-            # Detect persistent preferences (e.g. Hinglish, brevity)
-            new_pref = detect_persistent_preference(latest_text)
-            if new_pref and new_pref not in current_prefs:
-                current_prefs.append(new_pref)
-
-            # Detect mode transition (normal vs tisw)
-            current_mode = detect_mode_request(latest_text, current_mode)
-
-        # Build mode-specific SystemMessage with optional RAG grounding
-        system_msg = build_system_message(current_mode, current_prefs, rag_context)
-        model_input = [system_msg] + messages
-
-        response = llm.invoke(model_input)
-
-        return {
-            "messages": [response],
-            "session_preferences": current_prefs,
-            "active_mode": current_mode,
-            "rag_context": rag_context,
-        }
+        prepared = _prepare_tutor_turn(state)
+        if prepared["mode_command"]:
+            return _tutor_state_update(prepared, AIMessage(content="Understood."))
+        return _tutor_state_update(prepared, llm.invoke(prepared["model_input"]))
 
     workflow = StateGraph(TutorState)
     workflow.add_node("tutor", tutor_node)
     workflow.add_edge(START, "tutor")
     workflow.add_edge("tutor", END)
 
+    return workflow.compile(checkpointer=checkpointer)
+
+
+def create_tutor_streaming_graph(llm: ChatGroq, checkpointer: InMemorySaver):
+    """Build the same tutor workflow with native async model streaming.
+
+    The node consumes ``llm.astream`` once and returns one final AIMessage, so
+    LangGraph checkpoints the completed answer exactly once. The underlying
+    model callbacks remain visible to ``astream_events`` for token forwarding.
+    """
+
+    async def tutor_node(state: TutorState, config: Optional[RunnableConfig] = None) -> dict:
+        prepared = _prepare_tutor_turn(state)
+        if prepared["mode_command"]:
+            return _tutor_state_update(prepared, AIMessage(content="Understood."))
+
+        parts: list[str] = []
+        async for chunk in llm.astream(prepared["model_input"], config=config):
+            text = _message_chunk_text(chunk)
+            if text:
+                parts.append(text)
+        return _tutor_state_update(prepared, AIMessage(content="".join(parts)))
+
+    workflow = StateGraph(TutorState)
+    workflow.add_node("tutor", tutor_node)
+    workflow.add_edge(START, "tutor")
+    workflow.add_edge("tutor", END)
     return workflow.compile(checkpointer=checkpointer)
 
 
@@ -304,6 +358,9 @@ def load_and_validate_groq_llm() -> ChatGroq:
     initialized ChatGroq client.
     """
     load_dotenv()
+    configure_runtime()
+    if is_offline_mode():
+        raise RuntimeError("Groq client initialization is disabled while TISW_OFFLINE=true.")
 
     api_key = os.getenv("GROQ_API_KEY", "").strip()
     model_name = os.getenv("GROQ_MODEL", "").strip() or "openai/gpt-oss-20b"
@@ -313,24 +370,17 @@ def load_and_validate_groq_llm() -> ChatGroq:
         missing_vars.append("GROQ_API_KEY")
 
     if missing_vars:
-        print("\n[Configuration Error] Missing required environment variable(s):", file=sys.stderr)
-        for var in missing_vars:
-            print(f"  - {var}", file=sys.stderr)
-        print(
-            "\nPlease configure them in your .env file or environment before running:\n"
-            "  GROQ_API_KEY=your_groq_api_key_here\n"
-            "  GROQ_MODEL=your_chosen_groq_model_name\n",
-            file=sys.stderr,
+        missing = ", ".join(missing_vars)
+        raise ValueError(
+            f"Missing required environment variable(s): {missing}. "
+            "Configure them in .env or the process environment."
         )
-        sys.exit(1)
 
     if api_key in {"your_groq_api_key_here", "gsk_...", "changeme"}:
-        print(
-            "\n[Configuration Error] GROQ_API_KEY appears to be a placeholder value.\n"
-            "Please set a valid Groq API key in your .env file.",
-            file=sys.stderr,
+        raise ValueError(
+            "GROQ_API_KEY appears to be a placeholder value. "
+            "Set a valid Groq API key in .env."
         )
-        sys.exit(1)
 
     try:
         llm = ChatGroq(
@@ -341,19 +391,24 @@ def load_and_validate_groq_llm() -> ChatGroq:
         return llm
     except Exception as exc:
         print(
-            f"\n[Configuration Error] Failed to initialize ChatGroq with model '{model_name}': {exc}",
+            f"\n[Configuration Error] Failed to initialize ChatGroq with model '{model_name}'.",
             file=sys.stderr,
         )
-        sys.exit(1)
+        raise ValueError(f"Could not initialize the configured Groq model '{model_name}'.") from exc
 
 
 # Global checkpointer and compiled tutor graph instance for API / server import
 global_checkpointer = InMemorySaver()
-try:
-    _default_llm = load_and_validate_groq_llm()
-    tutor_app = create_tutor_graph(_default_llm, global_checkpointer)
-except Exception:
+tutor_stream_app = None
+if is_offline_mode():
     tutor_app = None
+else:
+    try:
+        _default_llm = load_and_validate_groq_llm()
+        tutor_app = create_tutor_graph(_default_llm, global_checkpointer)
+        tutor_stream_app = create_tutor_streaming_graph(_default_llm, global_checkpointer)
+    except Exception:
+        tutor_app = None
 
 
 # =====================================================================
@@ -423,8 +478,7 @@ def run_chat_loop() -> None:
         except KeyboardInterrupt:
             print("\n[Generation interrupted by user. You can ask another question or type 'exit' to quit.]")
         except Exception as exc:
-            error_msg = str(exc)
-            print(f"\n[Error] Groq API error: {error_msg}\n", file=sys.stderr)
+            print(f"\n[Error] Groq API error: {type(exc).__name__}.\n", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,39 @@
  *      React state (in-memory, cleared on page refresh).
  */
 
-export const API_BASE = "http://localhost:8000";
+export const API_BASE = import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
+const STREAM_DIAGNOSTICS = import.meta.env?.VITE_TISW_STREAM_DIAGNOSTICS === "true";
+
+function streamDiagnostic(stage, details = {}) {
+  if (STREAM_DIAGNOSTICS) {
+    console.debug("[TISW stream]", stage, details);
+  }
+}
+
+export function isActiveStreamRequest(activeRequest, requestId, threadId) {
+  return Boolean(
+    activeRequest &&
+    activeRequest.requestId === requestId &&
+    activeRequest.threadId === threadId
+  );
+}
+
+function sessionHeaders(sessionToken, headers = {}) {
+  if (sessionToken) headers["X-Session-Token"] = sessionToken;
+  return headers;
+}
+
+async function parseResponse(res, fallbackMessage) {
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `${fallbackMessage} (${res.status})`);
+  return data;
+}
+
+/** Create a server-issued session for the local .env Groq key. */
+export async function createServerSession() {
+  const res = await fetch(`${API_BASE}/api/session`, { method: "POST" });
+  return parseResponse(res, 'Could not create a tutor session');
+}
 
 // ─── Key Verification ──────────────────────────────────────────────────────────
 
@@ -28,10 +60,7 @@ export async function verifyGroqKey(apiKey) {
     body: JSON.stringify({ api_key: apiKey }),
   });
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data.detail || `Key verification failed (${res.status})`);
-  }
+  const data = await parseResponse(res, 'Key verification failed');
   // data.session_token is opaque — it is NOT the api key
   return data;
 }
@@ -46,25 +75,18 @@ export async function verifyGroqKey(apiKey) {
  * @param {string} params.threadId        — current conversation thread ID
  * @param {string} [params.mode]          — pedagogical mode ('normal' | 'tisw')
  * @param {string|null} [params.sessionToken]    — visitor session token
- * @param {string|null} [params.clientSessionId] — isolated client session ID
  * @param {boolean} [params.ragEnabled]   — whether document RAG is active
  * @returns {Promise<{ response: string, thread_id: string, mode: string, rag_used: boolean, sources?: Array }>}
  */
 export async function sendChatMessage({
   message,
   threadId,
+  turnId,
   mode,
   sessionToken,
-  clientSessionId,
   ragEnabled = false,
 }) {
-  const headers = { "Content-Type": "application/json" };
-  if (sessionToken) {
-    headers["X-Session-Token"] = sessionToken;
-  }
-  if (clientSessionId) {
-    headers["X-Client-Session-Id"] = clientSessionId;
-  }
+  const headers = sessionHeaders(sessionToken, { "Content-Type": "application/json" });
 
   const res = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
@@ -72,17 +94,147 @@ export async function sendChatMessage({
     body: JSON.stringify({
       message,
       thread_id: threadId,
+      turn_id: turnId,
       mode: mode || "normal",
       rag_enabled: Boolean(ragEnabled),
     }),
   });
 
-  if (!res.ok) {
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(errData.detail || `Server error (${res.status})`);
-  }
+  return parseResponse(res, 'Server error');
+}
 
-  return res.json();
+/**
+ * Stream one chat turn using the backend's SSE protocol.
+ * The callbacks receive parsed events; the response body is never buffered.
+ */
+export async function streamChatMessage({
+  message,
+  threadId,
+  turnId,
+  sessionToken,
+  ragEnabled = false,
+  tracingEnabled = false,
+  signal,
+  onStart,
+  onDelta,
+  onSources,
+  onDone,
+  onError,
+}) {
+  const headers = sessionHeaders(sessionToken, { "Content-Type": "application/json" });
+  streamDiagnostic("request", {
+    message,
+    threadId,
+    turnId,
+    tracingEnabled: Boolean(tracingEnabled),
+    hasSessionToken: Boolean(sessionToken),
+  });
+  const res = await fetch(`${API_BASE}/api/chat/stream`, {
+    method: "POST",
+    headers,
+    signal,
+    body: JSON.stringify({
+      message,
+      thread_id: threadId,
+      turn_id: turnId,
+      rag_enabled: Boolean(ragEnabled),
+      tracing_enabled: Boolean(tracingEnabled),
+    }),
+  });
+
+  if (!res.ok) return parseResponse(res, 'Server error');
+  if (!res.body) throw new Error('Streaming is unavailable in this browser.');
+
+  const reader = res.body.getReader();
+  return consumeSseReader(reader, {
+    onStart: (payload) => {
+      streamDiagnostic("start", payload);
+      onStart?.(payload);
+    },
+    onDelta: (text) => {
+      streamDiagnostic("delta", { text });
+      onDelta?.(text);
+    },
+    onSources: (sources) => onSources?.(sources),
+    onDone: (payload) => {
+      streamDiagnostic("done", payload);
+      onDone?.(payload);
+    },
+    onError: (error) => {
+      streamDiagnostic("error", { message: error.message, status: error.status });
+      onError?.(error);
+    },
+  });
+}
+
+/** Consume an already-open SSE reader; exported for deterministic browserless tests. */
+export async function consumeSseReader(reader, { onStart, onDelta, onSources, onDone, onError } = {}) {
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let currentEvent = 'message';
+  let dataLines = [];
+  let sawDone = false;
+
+  const dispatch = (frame) => {
+    const lines = frame.split(/\r?\n/);
+    currentEvent = 'message';
+    dataLines = [];
+    for (const line of lines) {
+      if (line.startsWith('event:')) currentEvent = line.slice(6).trim();
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+    }
+    if (dataLines.length === 0) return;
+    let payload;
+    try {
+      payload = JSON.parse(dataLines.join('\n'));
+    } catch {
+      throw new Error('The tutor returned an invalid streaming event.');
+    }
+    if (currentEvent === 'start') onStart?.(payload);
+    else if (currentEvent === 'delta') onDelta?.(payload.text || '');
+    else if (currentEvent === 'sources') onSources?.(payload.sources || []);
+    else if (currentEvent === 'done') {
+      sawDone = true;
+      onDone?.(payload);
+    }
+    else if (currentEvent === 'error') {
+      const error = new Error(payload.message || 'Generation failed.');
+      error.status = payload.status;
+      onError?.(error);
+      throw error;
+    }
+  };
+
+  const processFrames = () => {
+    const frames = buffer.split(/\r?\n\r?\n/);
+    buffer = frames.pop() || '';
+    for (const frame of frames) if (frame.trim()) dispatch(frame);
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      processFrames();
+    }
+    buffer += decoder.decode();
+    // A trailing frame without the SSE blank-line terminator is incomplete.
+    // Do not promote it to a successful done event at EOF.
+    if (!sawDone) throw new Error('The tutor stream ended before completion.');
+    return { streamed: true };
+  } catch (error) {
+    try { await reader.cancel(); } catch { /* preserve original error */ }
+    throw error;
+  } finally {
+    try { reader.releaseLock(); } catch { /* reader may already be released */ }
+  }
+}
+
+/** Safe local capability flags for the tracing control. */
+export async function getRuntimeStatus() {
+  const res = await fetch(`${API_BASE}/api/runtime`);
+  return parseResponse(res, 'Could not read backend runtime status');
 }
 
 // ─── File & Document Management ───────────────────────────────────────────────
@@ -95,9 +247,8 @@ export const SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".txt"];
  *
  * @param {File} file
  * @param {string|null} [sessionToken]
- * @param {string|null} [clientSessionId]
  */
-export async function uploadFile(file, sessionToken, clientSessionId) {
+export async function uploadFile(file, sessionToken) {
   const ext = "." + (file.name.split(".").pop() || "").toLowerCase();
   if (!SUPPORTED_EXTENSIONS.includes(ext)) {
     throw new Error(`Unsupported file type '${ext}'. Please upload a PDF, DOCX, or TXT file.`);
@@ -106,9 +257,7 @@ export async function uploadFile(file, sessionToken, clientSessionId) {
   const formData = new FormData();
   formData.append("file", file);
 
-  const headers = {};
-  if (sessionToken) headers["X-Session-Token"] = sessionToken;
-  if (clientSessionId) headers["X-Client-Session-Id"] = clientSessionId;
+  const headers = sessionHeaders(sessionToken);
 
   const res = await fetch(`${API_BASE}/api/upload`, {
     method: "POST",
@@ -116,37 +265,24 @@ export async function uploadFile(file, sessionToken, clientSessionId) {
     body: formData,
   });
 
-  if (!res.ok) {
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(errData.detail || `Upload failed (${res.status})`);
-  }
-
-  return res.json();
+  return parseResponse(res, 'Upload failed');
 }
 
 /**
  * Fetches the list of uploaded documents for the active session.
  *
  * @param {string|null} [sessionToken]
- * @param {string|null} [clientSessionId]
  * @returns {Promise<{ documents: Array }>}
  */
-export async function fetchDocuments(sessionToken, clientSessionId) {
-  const headers = {};
-  if (sessionToken) headers["X-Session-Token"] = sessionToken;
-  if (clientSessionId) headers["X-Client-Session-Id"] = clientSessionId;
+export async function fetchDocuments(sessionToken) {
+  const headers = sessionHeaders(sessionToken);
 
   const res = await fetch(`${API_BASE}/api/documents`, {
     method: "GET",
     headers,
   });
 
-  if (!res.ok) {
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(errData.detail || `Failed to fetch documents (${res.status})`);
-  }
-
-  return res.json();
+  return parseResponse(res, 'Failed to fetch documents');
 }
 
 /**
@@ -154,24 +290,16 @@ export async function fetchDocuments(sessionToken, clientSessionId) {
  *
  * @param {string} docId
  * @param {string|null} [sessionToken]
- * @param {string|null} [clientSessionId]
  */
-export async function deleteDocument(docId, sessionToken, clientSessionId) {
-  const headers = {};
-  if (sessionToken) headers["X-Session-Token"] = sessionToken;
-  if (clientSessionId) headers["X-Client-Session-Id"] = clientSessionId;
+export async function deleteDocument(docId, sessionToken) {
+  const headers = sessionHeaders(sessionToken);
 
   const res = await fetch(`${API_BASE}/api/documents/${docId}`, {
     method: "DELETE",
     headers,
   });
 
-  if (!res.ok) {
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(errData.detail || `Failed to delete document (${res.status})`);
-  }
-
-  return res.json();
+  return parseResponse(res, 'Failed to delete document');
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
