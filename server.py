@@ -268,9 +268,18 @@ _allowed_origins = [
     if origin.strip()
 ]
 
+# Vercel serves each preview under its own hostname and Vite picks a new port
+# whenever the default is taken, so a fixed list alone makes the browser report
+# a bare "Failed to fetch" on every other origin.
+_allowed_origin_regex = os.getenv(
+    "TISW_ALLOWED_ORIGIN_REGEX",
+    r"https://tisw-frontend[a-z0-9-]*\.vercel\.app|http://(localhost|127\.0\.0\.1)(:\d+)?",
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
+    allow_origin_regex=_allowed_origin_regex,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

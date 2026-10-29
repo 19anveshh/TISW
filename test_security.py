@@ -39,6 +39,38 @@ def run_security_tests():
 
     print("✓ API keys are absent from verification responses, logs, and health output")
 
+    run_cors_tests()
+
+
+def run_cors_tests():
+    allowed = [
+        "https://tisw-frontend.vercel.app",
+        "https://tisw-frontend-git-main-19anveshh.vercel.app",
+        "http://localhost:5199",
+        "http://127.0.0.1:4173",
+    ]
+    for origin in allowed:
+        response = client.options(
+            "/api/verify-key",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type,x-client-id",
+            },
+        )
+        assert response.headers.get("access-control-allow-origin") == origin, origin
+
+    rejected = client.options(
+        "/api/verify-key",
+        headers={
+            "Origin": "https://tisw-frontend.vercel.app.evil.example",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert "access-control-allow-origin" not in rejected.headers
+
+    print("✓ Deployment previews and any local dev port may call the API; look-alike hosts may not")
+
 
 if __name__ == "__main__":
     run_security_tests()

@@ -281,8 +281,10 @@ restart:
 - Uploads are limited by extension, basic file signature, size, and document
   count. Filenames are reduced to safe basenames before indexing.
 - Configure public browser origins with `TISW_ALLOWED_ORIGINS` before a public
-  deployment. Use HTTPS and a real authenticated/shared session service for
-  multi-user production deployments.
+  deployment. `TISW_ALLOWED_ORIGIN_REGEX` covers hosts that change per deploy or
+  per run; its default allows the TISW Vercel project (production and previews)
+  and any `localhost`/`127.0.0.1` port. Use HTTPS and a real
+  authenticated/shared session service for multi-user production deployments.
 
 ## Tests and checks
 

@@ -58,9 +58,33 @@ async function parseResponse(res, fallbackMessage) {
   return data;
 }
 
+const NETWORK_HINT =
+  'Could not reach the tutor server. It may still be starting up — wait a few seconds and try again.';
+
+/**
+ * fetch() rejects with a bare "Failed to fetch" when the request never gets a
+ * response: a CORS rejection, a dropped connection, or the host waking from a
+ * cold start. A sleeping host usually accepts the retried request, so retry
+ * once before surfacing a message the visitor can act on.
+ */
+async function fetchReachable(url, options) {
+  try {
+    return await fetch(url, options);
+  } catch (err) {
+    if (err?.name === 'AbortError') throw err;
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    try {
+      return await fetch(url, options);
+    } catch (retryErr) {
+      if (retryErr?.name === 'AbortError') throw retryErr;
+      throw new Error(NETWORK_HINT);
+    }
+  }
+}
+
 /** Create a server-issued session for the local .env Groq key. */
 export async function createServerSession() {
-  const res = await fetch(`${API_BASE}/api/session`, {
+  const res = await fetchReachable(`${API_BASE}/api/session`, {
     method: "POST",
     headers: sessionHeaders(null),
   });
@@ -78,7 +102,7 @@ export async function createServerSession() {
  * @returns {Promise<{ session_token: string, model: string, message: string }>}
  */
 export async function verifyGroqKey(apiKey) {
-  const res = await fetch(`${API_BASE}/api/verify-key`, {
+  const res = await fetchReachable(`${API_BASE}/api/verify-key`, {
     method: "POST",
     headers: sessionHeaders(null, { "Content-Type": "application/json" }),
     body: JSON.stringify({ api_key: apiKey }),
