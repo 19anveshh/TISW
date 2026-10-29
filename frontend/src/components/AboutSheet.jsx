@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { X } from '../icons';
 import './AboutSheet.css';
 
-const EXIT_MS = 380;
+const EXIT_MS = 260;
 
 function prefersReducedMotion() {
   return typeof window !== 'undefined'
@@ -11,7 +11,7 @@ function prefersReducedMotion() {
 
 export default function AboutSheet({ onClose }) {
   const [closing, setClosing] = useState(false);
-  const closeRef = useRef(null);
+  const sheetRef = useRef(null);
   const closedRef = useRef(false);
   const exitTimerRef = useRef(null);
 
@@ -30,7 +30,7 @@ export default function AboutSheet({ onClose }) {
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    closeRef.current?.focus();
+    sheetRef.current?.focus();
 
     const onKeyDown = (event) => {
       if (event.key === 'Escape') {
@@ -56,25 +56,23 @@ export default function AboutSheet({ onClose }) {
       }}
     >
       <div
+        ref={sheetRef}
+        tabIndex={-1}
         className={`about-sheet ${closing ? 'about-sheet--closing' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label="About TISW"
       >
         <button
-          ref={closeRef}
           type="button"
           className="about-close"
           onClick={requestClose}
           aria-label="Close About"
         >
-          <X className="w-4 h-4" />
+          <X className="w-5 h-5" />
         </button>
 
-        <header className="about-head">
-          <span className="about-eyebrow">About TISW</span>
-          <h2 className="about-title">Teaching in a Structured Way</h2>
-        </header>
+        <h2 className="about-title">About Our Platform</h2>
 
         <div className="about-body">
           <p>
@@ -96,15 +94,6 @@ export default function AboutSheet({ onClose }) {
             effectively.
           </p>
         </div>
-
-        <footer className="about-foot">
-          <p className="about-tagline">
-            Learn smarter. Evaluate your progress. Improve with confidence.
-          </p>
-          <button type="button" className="about-btn" onClick={requestClose}>
-            Got it
-          </button>
-        </footer>
       </div>
     </div>
   );
