@@ -41,3 +41,15 @@ export function updateAssistantMessage(messages, assistantMessageId, update) {
       : message
   ));
 }
+
+/** Converts stored transcript rows into renderable message objects. */
+export function messagesFromHistory(rows = []) {
+  return rows.map((row) => ({
+    id: `history:${row.id}`,
+    role: row.role,
+    content: row.content || '',
+    sources: Array.isArray(row.sources) ? row.sources : [],
+    rag_used: Boolean(row.rag_used),
+    timestamp: row.created_at ? Math.round(row.created_at * 1000) : undefined,
+  }));
+}

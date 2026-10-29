@@ -36,6 +36,7 @@ ENDPOINTS
   POST /api/reset       — Issue fresh thread_id
   GET  /api/health      — Backend health
   POST /api/upload      — Document upload
+  GET  /api/threads     — Persisted conversations for this browser
 """
 
 import os
@@ -97,6 +98,7 @@ from rag_engine import (
     FINAL_TOP_K,
     MAX_FILE_SIZE_BYTES,
 )
+import persistence
 
 # ── Fallback: try to init global tutor_app if main.py left it as None ─────────
 if tutor_app is None and not is_offline_mode():
@@ -116,15 +118,18 @@ if tutor_app is None and not is_offline_mode():
 SESSION_TTL_SECONDS = 7200   # 2 hours; token expires after this
 
 class _SessionEntry:
-    __slots__ = ("api_key", "model", "expires_at", "checkpointer")
+    __slots__ = ("api_key", "model", "expires_at", "checkpointer", "client_id", "documents_restored")
 
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, client_id: Optional[str] = None):
         self.api_key: str = api_key
         self.model: str = model
         self.expires_at: float = time.monotonic() + SESSION_TTL_SECONDS
         # Each visitor session gets its own isolated checkpointer so conversation
         # history from one user cannot bleed into another's.
         self.checkpointer: InMemorySaver = InMemorySaver()
+        # Browser-stable id used to reload persisted chats and documents.
+        self.client_id: Optional[str] = client_id
+        self.documents_restored: bool = False
 
     def is_expired(self) -> bool:
         return time.monotonic() > self.expires_at
@@ -172,11 +177,11 @@ def _build_llm_for_session(entry: _SessionEntry) -> ChatGroq:
     )
 
 
-def _issue_session_token(api_key: str, model: str) -> str:
+def _issue_session_token(api_key: str, model: str, client_id: Optional[str] = None) -> str:
     """Create a server-owned opaque bearer token for one isolated session."""
     _prune_expired_sessions()
     token = secrets.token_urlsafe(32)
-    _session_store[token] = _SessionEntry(api_key=api_key, model=model)
+    _session_store[token] = _SessionEntry(api_key=api_key, model=model, client_id=client_id)
     return token
 
 
@@ -190,6 +195,57 @@ def _require_session_token(token: Optional[str]) -> str:
         )
     _resolve_session(clean_token)
     return clean_token
+
+
+# ── Browser-stable client id (history and document persistence scope) ─────────
+
+_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _client_id_from_header(raw: Optional[str]) -> Optional[str]:
+    """Validate the opaque browser id used to reload this visitor's workspace."""
+    value = (raw or "").strip()
+    if not value:
+        return None
+    if not _CLIENT_ID_RE.match(value):
+        raise HTTPException(status_code=400, detail="Invalid client identifier.")
+    return value
+
+
+def _require_client_id(raw: Optional[str]) -> str:
+    client_id = _client_id_from_header(raw)
+    if not client_id:
+        raise HTTPException(status_code=400, detail="A client identifier is required.")
+    return client_id
+
+
+def _validate_thread_id(thread_id: str) -> str:
+    if not _THREAD_ID_RE.match(thread_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid thread identifier.")
+    return thread_id
+
+
+def _restore_documents_for_session(session_id: str, entry: _SessionEntry) -> None:
+    """Re-index this visitor's stored documents once per issued session."""
+    if not entry.client_id or entry.documents_restored:
+        return
+    entry.documents_restored = True
+    try:
+        stored = persistence.load_documents_for_restore(entry.client_id)
+    except Exception as exc:
+        print(f"[DOC RESTORE ERROR] {type(exc).__name__}", file=sys.stderr)
+        return
+    if not stored:
+        return
+    doc_index = get_session_document_index(session_id)
+    for row in stored:
+        if row["doc_id"] in doc_index.documents:
+            continue
+        try:
+            doc_index.add_document(row["filename"], row["content"], doc_id=row["doc_id"])
+        except Exception as exc:
+            print(f"[DOC RESTORE ERROR] {type(exc).__name__}", file=sys.stderr)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -279,6 +335,29 @@ class UploadDocumentResponse(BaseModel):
 class ResetResponse(BaseModel):
     message: str
     thread_id: str
+
+
+class ThreadItem(BaseModel):
+    thread_id: str
+    label: str
+    message_count: int
+    created_at: float
+    updated_at: float
+
+class ThreadListResponse(BaseModel):
+    threads: List[ThreadItem]
+
+class StoredMessage(BaseModel):
+    id: int
+    role: str
+    content: str
+    sources: List[SourceItem] = []
+    rag_used: bool = False
+    created_at: float
+
+class ThreadMessagesResponse(BaseModel):
+    thread_id: str
+    messages: List[StoredMessage]
 
 
 class RuntimeStatusResponse(BaseModel):
@@ -376,6 +455,64 @@ def _build_retrieval_query(graph: Any, config: Dict[str, Any], user_text: str) -
         # Retrieval still works with the current query if a graph has no state yet.
         pass
     return user_text
+
+
+HISTORY_SEED_LIMIT = 24   # newest stored messages replayed into a fresh checkpointer
+
+
+def _seed_graph_history(
+    graph: Any,
+    config: Dict[str, Any],
+    client_id: str,
+    thread_id: str,
+) -> None:
+    """Give a re-issued session the conversation memory of its persisted thread."""
+    try:
+        history = persistence.load_history_for_graph(
+            client_id, thread_id, limit=HISTORY_SEED_LIMIT
+        )
+    except Exception as exc:
+        print(f"[HISTORY SEED ERROR] {type(exc).__name__}", file=sys.stderr)
+        return
+    messages: List[Any] = []
+    for row in history:
+        content = (row.get("content") or "").strip()
+        if not content:
+            continue
+        if row.get("role") == "user":
+            messages.append(HumanMessage(content=content))
+        elif row.get("role") == "assistant":
+            messages.append(AIMessage(content=content))
+    if not messages:
+        return
+    try:
+        graph.update_state(config, {"messages": messages})
+    except Exception as exc:
+        print(f"[HISTORY SEED ERROR] {type(exc).__name__}", file=sys.stderr)
+
+
+def _persist_completed_turn(
+    client_id: Optional[str],
+    thread_id: str,
+    turn_id: str,
+    user_text: str,
+    response: ChatResponse,
+) -> None:
+    """Store one finished exchange; persistence failures never fail the reply."""
+    if not client_id:
+        return
+    try:
+        persistence.record_turn(
+            client_id,
+            thread_id,
+            turn_id,
+            user_text,
+            response.response,
+            sources=[source.model_dump() for source in (response.sources or [])],
+            rag_used=bool(response.rag_used),
+        )
+    except Exception as exc:
+        print(f"[PERSIST ERROR] {type(exc).__name__}", file=sys.stderr)
 
 
 def _request_thread_id(payload: ChatRequest) -> str:
@@ -685,6 +822,7 @@ def _prepare_chat_execution(
     thread_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     request_id: Optional[str] = None,
+    client_id: Optional[str] = None,
 ) -> dict[str, Any]:
     if is_offline_mode():
         raise HTTPException(status_code=503, detail="Groq access is disabled while TISW_OFFLINE=true.")
@@ -706,6 +844,8 @@ def _prepare_chat_execution(
         current_mode = values.get("active_mode", "normal") or "normal"
     except Exception:
         pass
+    if client_id and not (snapshot_values or {}).get("messages"):
+        _seed_graph_history(graph, config_base, client_id, thread_id)
     expected_mode = detect_mode_request(user_text, current_mode)
     request_id = request_id or uuid.uuid4().hex
     enriched = enrich_message(user_text)
@@ -718,6 +858,7 @@ def _prepare_chat_execution(
         invoke_payload = {"messages": [HumanMessage(content=enriched)], "rag_context": None}
     elif rag_enabled:
         session_id = _require_session_token(session_token)
+        _restore_documents_for_session(session_id, _resolve_session(session_id))
         doc_index = get_session_document_index(session_id)
         if len(doc_index.documents) == 0:
             early = ChatResponse(
@@ -849,7 +990,11 @@ async def _replay_stream_events(record: _TurnRecord) -> AsyncIterator[str]:
     yield _sse_event("done", {**response, "replay": True})
 
 
-async def _stream_chat_events(payload: ChatRequest, session_token: Optional[str]) -> AsyncIterator[str]:
+async def _stream_chat_events(
+    payload: ChatRequest,
+    session_token: Optional[str],
+    client_id: Optional[str] = None,
+) -> AsyncIterator[str]:
     if _mock_streaming_enabled():
         mock_request_id = uuid.uuid4().hex
         mock_turn_id = _request_turn_id(payload)
@@ -899,6 +1044,7 @@ async def _stream_chat_events(payload: ChatRequest, session_token: Optional[str]
             turn_id=turn_id,
             request_id=request_id,
             record=record,
+            client_id=client_id,
         ):
             yield event
 
@@ -951,6 +1097,7 @@ async def _stream_chat_events_locked(
     turn_id: str,
     request_id: str,
     record: _TurnRecord,
+    client_id: Optional[str] = None,
 ) -> AsyncIterator[str]:
     execution = None
     emitted_text = False
@@ -964,6 +1111,7 @@ async def _stream_chat_events_locked(
             thread_id=thread_id,
             turn_id=turn_id,
             request_id=request_id,
+            client_id=client_id,
         )
         graph_message = (
             execution["invoke_payload"]["messages"][-1].content
@@ -995,6 +1143,7 @@ async def _stream_chat_events_locked(
             early_response = execution["early_response"]
             early_response.turn_id = turn_id
             _mark_turn(record, TURN_COMPLETED, early_response.model_dump())
+            _persist_completed_turn(client_id, thread_id, turn_id, payload.message.strip(), early_response)
             if final_response:
                 emitted_text = True
                 yield _sse_event("delta", {"text": final_response})
@@ -1059,6 +1208,7 @@ async def _stream_chat_events_locked(
             source="live_generation",
         )
         _mark_turn(record, TURN_COMPLETED, response.model_dump())
+        _persist_completed_turn(client_id, thread_id, turn_id, payload.message.strip(), response)
         if execution["sources"]:
             yield _sse_event("sources", {"sources": [source.model_dump() for source in execution["sources"]]})
         yield _sse_event("done", response.model_dump())
@@ -1082,7 +1232,9 @@ async def _stream_chat_events_locked(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.post("/api/session", response_model=SessionResponse)
-def create_local_session():
+def create_local_session(
+    x_client_id: Optional[str] = Header(default=None, alias="X-Client-Id"),
+):
     """Issue an isolated session for the server-configured local Groq key."""
     if is_offline_mode():
         raise HTTPException(status_code=503, detail="Groq access is disabled while TISW_OFFLINE=true.")
@@ -1093,7 +1245,7 @@ def create_local_session():
             detail="No server Groq API key is configured. Add one or verify a visitor key.",
         )
 
-    token = _issue_session_token(api_key, GROQ_DEFAULT_MODEL)
+    token = _issue_session_token(api_key, GROQ_DEFAULT_MODEL, _client_id_from_header(x_client_id))
     return SessionResponse(
         session_token=token,
         model=GROQ_DEFAULT_MODEL,
@@ -1102,7 +1254,10 @@ def create_local_session():
 
 
 @app.post("/api/verify-key", response_model=VerifyKeyResponse)
-async def verify_key(payload: VerifyKeyRequest):
+async def verify_key(
+    payload: VerifyKeyRequest,
+    x_client_id: Optional[str] = Header(default=None, alias="X-Client-Id"),
+):
     """
     Verify a visitor-supplied Groq API key with a real test request.
     Returns an opaque session token on success.
@@ -1135,7 +1290,7 @@ async def verify_key(payload: VerifyKeyRequest):
         raise _classify_groq_error(str(exc))
 
     # ── Verification passed — issue session token ──────────────────────────────
-    token = _issue_session_token(raw_key, model)
+    token = _issue_session_token(raw_key, model, _client_id_from_header(x_client_id))
     return VerifyKeyResponse(
         session_token=token,
         model=model,
@@ -1161,10 +1316,11 @@ def runtime_status():
 async def chat_stream_endpoint(
     payload: ChatRequest,
     x_session_token: Optional[str] = Header(default=None, alias="X-Session-Token"),
+    x_client_id: Optional[str] = Header(default=None, alias="X-Client-Id"),
 ):
     """Stream one LangGraph turn as user-facing Server-Sent Events."""
     return StreamingResponse(
-        _stream_chat_events(payload, x_session_token),
+        _stream_chat_events(payload, x_session_token, _client_id_from_header(x_client_id)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -1177,8 +1333,10 @@ async def chat_stream_endpoint(
 async def chat_endpoint(
     payload: ChatRequest,
     x_session_token: Optional[str] = Header(default=None, alias="X-Session-Token"),
+    x_client_id: Optional[str] = Header(default=None, alias="X-Client-Id"),
 ):
     """Backwards-compatible non-streaming LangGraph chat endpoint."""
+    client_id = _client_id_from_header(x_client_id)
     thread_id = _request_thread_id(payload)
     turn_id = _request_turn_id(payload)
     async with _conversation_guard(x_session_token, thread_id):
@@ -1199,6 +1357,7 @@ async def chat_endpoint(
                 streaming=False,
                 thread_id=thread_id,
                 turn_id=turn_id,
+                client_id=client_id,
             )
             if execution["early_response"] is not None:
                 response = execution["early_response"]
@@ -1228,6 +1387,7 @@ async def chat_endpoint(
                 )
             response.turn_id = turn_id
             _mark_turn(record, TURN_COMPLETED, response.model_dump())
+            _persist_completed_turn(client_id, thread_id, turn_id, payload.message.strip(), response)
             return response
         except HTTPException:
             _restore_checkpoint(execution)
@@ -1261,6 +1421,51 @@ def reset_session():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# PERSISTED CONVERSATION HISTORY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/threads", response_model=ThreadListResponse)
+def list_threads(
+    x_client_id: Optional[str] = Header(default=None, alias="X-Client-Id"),
+):
+    """Lists this browser's stored conversations, newest first."""
+    client_id = _client_id_from_header(x_client_id)
+    if not client_id:
+        return ThreadListResponse(threads=[])
+    return ThreadListResponse(
+        threads=[ThreadItem(**row) for row in persistence.list_threads(client_id)]
+    )
+
+
+@app.get("/api/threads/{thread_id}/messages", response_model=ThreadMessagesResponse)
+def list_thread_messages(
+    thread_id: str,
+    x_client_id: Optional[str] = Header(default=None, alias="X-Client-Id"),
+):
+    """Returns the stored transcript for one conversation."""
+    client_id = _require_client_id(x_client_id)
+    _validate_thread_id(thread_id)
+    stored = persistence.list_messages(client_id, thread_id)
+    return ThreadMessagesResponse(
+        thread_id=thread_id,
+        messages=[StoredMessage(**row) for row in stored],
+    )
+
+
+@app.delete("/api/threads/{thread_id}")
+def delete_thread(
+    thread_id: str,
+    x_client_id: Optional[str] = Header(default=None, alias="X-Client-Id"),
+):
+    """Deletes one stored conversation and its messages."""
+    client_id = _require_client_id(x_client_id)
+    _validate_thread_id(thread_id)
+    if not persistence.delete_thread(client_id, thread_id):
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return {"status": "success", "message": "Conversation deleted."}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # DOCUMENT MANAGEMENT & INGESTION (SESSION ISOLATED)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1287,6 +1492,8 @@ async def upload_document(
         )
 
     session_id = _require_session_token(x_session_token)
+    session_entry = _resolve_session(session_id)
+    _restore_documents_for_session(session_id, session_entry)
     doc_index = get_session_document_index(session_id)
 
     try:
@@ -1297,6 +1504,20 @@ async def upload_document(
                 detail=f"File exceeds the {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB upload limit.",
             )
         meta = doc_index.add_document(safe_filename, content)
+        if session_entry.client_id:
+            try:
+                persistence.save_document(
+                    session_entry.client_id,
+                    doc_id=meta.doc_id,
+                    filename=meta.filename,
+                    file_type=meta.file_type,
+                    size_kb=meta.size_kb,
+                    chunk_count=meta.chunk_count,
+                    uploaded_at=meta.uploaded_at,
+                    content=content,
+                )
+            except Exception as exc:
+                print(f"[PERSIST ERROR] {type(exc).__name__}", file=sys.stderr)
         return UploadDocumentResponse(
             status="success",
             doc_id=meta.doc_id,
@@ -1321,6 +1542,7 @@ def list_documents(
 ):
     """Lists all documents indexed for the current session."""
     session_id = _require_session_token(x_session_token)
+    _restore_documents_for_session(session_id, _resolve_session(session_id))
     doc_index = get_session_document_index(session_id)
     return DocumentListResponse(documents=doc_index.list_documents())
 
@@ -1332,10 +1554,17 @@ def delete_document(
 ):
     """Deletes a document from the session index and purges its vector and BM25 entries."""
     session_id = _require_session_token(x_session_token)
+    session_entry = _resolve_session(session_id)
+    _restore_documents_for_session(session_id, session_entry)
     doc_index = get_session_document_index(session_id)
     removed = doc_index.remove_document(doc_id)
     if not removed:
         raise HTTPException(status_code=404, detail="Document not found or already removed.")
+    if session_entry.client_id:
+        try:
+            persistence.delete_document(session_entry.client_id, doc_id)
+        except Exception as exc:
+            print(f"[PERSIST ERROR] {type(exc).__name__}", file=sys.stderr)
     return {"status": "success", "message": "Document removed and index updated."}
 
 

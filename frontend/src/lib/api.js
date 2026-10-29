@@ -11,10 +11,29 @@
 
 export const API_BASE = import.meta.env?.VITE_API_BASE_URL || "http://localhost:8000";
 const STREAM_DIAGNOSTICS = import.meta.env?.VITE_TISW_STREAM_DIAGNOSTICS === "true";
+const CLIENT_ID_KEY = "tisw.client_id";
+const CLIENT_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
 
 function streamDiagnostic(stage, details = {}) {
   if (STREAM_DIAGNOSTICS) {
     console.debug("[TISW stream]", stage, details);
+  }
+}
+
+/**
+ * Browser-stable id that lets the backend reload this visitor's saved
+ * conversations and documents after a refresh. It scopes local data only;
+ * it is never used for authentication.
+ */
+export function getClientId() {
+  try {
+    const stored = localStorage.getItem(CLIENT_ID_KEY);
+    if (stored && CLIENT_ID_PATTERN.test(stored)) return stored;
+    const generated = crypto.randomUUID().replace(/-/g, "");
+    localStorage.setItem(CLIENT_ID_KEY, generated);
+    return generated;
+  } catch {
+    return null;
   }
 }
 
@@ -28,6 +47,8 @@ export function isActiveStreamRequest(activeRequest, requestId, threadId) {
 
 function sessionHeaders(sessionToken, headers = {}) {
   if (sessionToken) headers["X-Session-Token"] = sessionToken;
+  const clientId = getClientId();
+  if (clientId) headers["X-Client-Id"] = clientId;
   return headers;
 }
 
@@ -39,7 +60,10 @@ async function parseResponse(res, fallbackMessage) {
 
 /** Create a server-issued session for the local .env Groq key. */
 export async function createServerSession() {
-  const res = await fetch(`${API_BASE}/api/session`, { method: "POST" });
+  const res = await fetch(`${API_BASE}/api/session`, {
+    method: "POST",
+    headers: sessionHeaders(null),
+  });
   return parseResponse(res, 'Could not create a tutor session');
 }
 
@@ -56,13 +80,46 @@ export async function createServerSession() {
 export async function verifyGroqKey(apiKey) {
   const res = await fetch(`${API_BASE}/api/verify-key`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: sessionHeaders(null, { "Content-Type": "application/json" }),
     body: JSON.stringify({ api_key: apiKey }),
   });
 
   const data = await parseResponse(res, 'Key verification failed');
   // data.session_token is opaque — it is NOT the api key
   return data;
+}
+
+// ─── Persisted Conversation History ───────────────────────────────────────────
+
+/** Lists this browser's stored conversations, newest first. */
+export async function fetchThreads() {
+  const res = await fetch(`${API_BASE}/api/threads`, {
+    headers: sessionHeaders(null),
+  });
+  return parseResponse(res, 'Could not load conversation history');
+}
+
+/** Returns the stored transcript for one conversation. */
+export async function fetchThreadMessages(threadId) {
+  const res = await fetch(`${API_BASE}/api/threads/${encodeURIComponent(threadId)}/messages`, {
+    headers: sessionHeaders(null),
+  });
+  return parseResponse(res, 'Could not load that conversation');
+}
+
+/** Deletes one stored conversation. */
+export async function deleteThread(threadId) {
+  const res = await fetch(`${API_BASE}/api/threads/${encodeURIComponent(threadId)}`, {
+    method: "DELETE",
+    headers: sessionHeaders(null),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const error = new Error(data.detail || `Could not delete that conversation (${res.status})`);
+    error.status = res.status;
+    throw error;
+  }
+  return res.json().catch(() => ({}));
 }
 
 // ─── Chat ──────────────────────────────────────────────────────────────────────

@@ -1,0 +1,276 @@
+/* ==========================================================================
+   ABOUT SHEET — glass card that rises from the bottom
+   ========================================================================== */
+
+.about-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  perspective: 1400px;
+  background:
+    radial-gradient(60% 55% at 50% 78%, rgba(124, 58, 237, 0.28) 0%, rgba(5, 4, 11, 0.76) 72%),
+    rgba(4, 3, 9, 0.5);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  animation: aboutOverlayIn 260ms ease both;
+}
+
+.about-overlay--closing {
+  animation: aboutOverlayOut 380ms ease both;
+  pointer-events: none;
+}
+
+@keyframes aboutOverlayIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes aboutOverlayOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.about-sheet {
+  position: relative;
+  width: min(800px, 100%);
+  max-height: min(88vh, 720px);
+  display: flex;
+  flex-direction: column;
+  padding: 32px 34px 26px;
+  border-radius: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.05) 42%, rgba(124, 58, 237, 0.12) 100%),
+    rgba(22, 17, 36, 0.38);
+  backdrop-filter: blur(38px) saturate(185%);
+  -webkit-backdrop-filter: blur(38px) saturate(185%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.06),
+    0 -16px 60px rgba(0, 0, 0, 0.42),
+    0 28px 90px rgba(0, 0, 0, 0.48),
+    0 0 110px rgba(124, 58, 237, 0.2);
+  transform-origin: 50% 100%;
+  animation: aboutSheetRise 560ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  overflow: hidden;
+}
+
+.about-sheet::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background:
+    radial-gradient(120% 70% at 18% 0%, rgba(255, 255, 255, 0.13) 0%, transparent 46%),
+    radial-gradient(90% 60% at 100% 100%, rgba(168, 85, 247, 0.14) 0%, transparent 60%);
+}
+
+.about-sheet--closing {
+  animation: aboutSheetSink 380ms cubic-bezier(0.55, 0, 0.85, 0.35) both;
+}
+
+@keyframes aboutSheetRise {
+  0% {
+    opacity: 0;
+    transform: translateY(calc(100vh + 48px)) rotateX(10deg) scale(0.97);
+  }
+  55% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) rotateX(0deg) scale(1);
+  }
+}
+
+@keyframes aboutSheetSink {
+  0% {
+    opacity: 1;
+    transform: translateY(0) rotateX(0deg) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(calc(100vh + 64px)) rotateX(9deg) scale(0.975);
+  }
+}
+
+/* --- Close button ------------------------------------------------------- */
+
+.about-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 3;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.78);
+  cursor: pointer;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease, border-color 0.18s ease;
+}
+
+.about-close:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.28);
+  transform: rotate(90deg);
+}
+
+.about-close:focus-visible,
+.about-btn:focus-visible {
+  outline: 2px solid rgba(168, 85, 247, 0.7);
+  outline-offset: 2px;
+}
+
+/* --- Content ------------------------------------------------------------ */
+
+.about-head {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 44px;
+}
+
+.about-eyebrow {
+  align-self: flex-start;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  background: rgba(147, 51, 234, 0.16);
+  color: #e9d5ff;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.about-title {
+  margin: 0;
+  font-size: clamp(19px, 2.4vw, 23px);
+  line-height: 1.28;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  color: #f7f5ff;
+}
+
+.about-body {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  margin-top: 16px;
+  padding-right: 6px;
+  overflow-y: auto;
+  font-size: 14.5px;
+  line-height: 1.7;
+  color: rgba(255, 255, 255, 0.82);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+
+.about-body p {
+  margin: 0;
+}
+
+.about-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.about-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 9999px;
+}
+
+.about-foot {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.about-tagline {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  background: linear-gradient(90deg, #c4b5fd 0%, #e9d5ff 50%, #a5b4fc 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.about-btn {
+  padding: 9px 20px;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%);
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow:
+    0 8px 24px rgba(124, 58, 237, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.24);
+  transition: background 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.about-btn:hover {
+  background: linear-gradient(135deg, #8b5cf6 0%, #c084fc 100%);
+  box-shadow:
+    0 12px 30px rgba(124, 58, 237, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  transform: translateY(-1px);
+}
+
+@media (max-width: 640px) {
+  .about-overlay {
+    padding: 12px;
+  }
+  .about-sheet {
+    padding: 24px 20px 18px;
+    max-height: 90vh;
+    border-radius: 22px;
+  }
+  .about-body {
+    font-size: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .about-overlay,
+  .about-overlay--closing,
+  .about-sheet,
+  .about-sheet--closing {
+    animation: none;
+  }
+  .about-close,
+  .about-btn {
+    transition: none;
+  }
+  .about-close:hover,
+  .about-btn:hover {
+    transform: none;
+  }
+}

@@ -1,145 +1,57 @@
-import React, { useEffect, useRef, useState } from 'react';
-
-const TOTAL_FRAMES = 400;
-const FRAME_RATE = 24; // fps
+import React, { useEffect, useRef } from 'react';
 
 export default function EarthBackground({
   overlayOpacity = 0.38,
   glowOpacity = 0.55
 }) {
-  const canvasRef = useRef(null);
-  const [loadedPercent, setLoadedPercent] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(true);
+  const videoRef = useRef(null);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d', { alpha: false });
+    const video = videoRef.current;
+    if (!video) return undefined;
 
-    let animationFrameId;
-    let currentFrameIndex = 0;
-    let lastTimestamp = 0;
-    const frameInterval = 1000 / FRAME_RATE;
-
-    // Cache array for preloaded Image objects
-    const images = new Array(TOTAL_FRAMES);
-    let loadedCount = 0;
-
-    // Helper to format frame path: frame_0001.jpg -> frame_0400.jpg
-    const getFrameUrl = (index) => {
-      const numStr = String(index + 1).padStart(4, '0');
-      return `/earth-frames/frame_${numStr}.jpg`;
-    };
-
-    // Preload high-priority initial chunk first, then load the rest asynchronously
-    const INITIAL_CHUNK = 40;
-
-    const loadSingleImage = (index) => {
-      if (images[index]) return;
-      const img = new Image();
-      img.src = getFrameUrl(index);
-      img.onload = () => {
-        images[index] = img;
-        loadedCount++;
-        if (loadedCount % 10 === 0 || loadedCount === TOTAL_FRAMES) {
-          setLoadedPercent(Math.round((loadedCount / TOTAL_FRAMES) * 100));
-        }
-      };
-    };
-
-    // Load first batch immediately
-    for (let i = 0; i < Math.min(INITIAL_CHUNK, TOTAL_FRAMES); i++) {
-      loadSingleImage(i);
+    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    const saveData = navigator.connection?.saveData;
+    if (reducedMotion || saveData) {
+      video.pause();
+      return undefined;
     }
 
-    // Schedule remaining frames in background so initial render is instantaneous
-    const idleId = requestIdleCallback
-      ? requestIdleCallback(() => {
-          for (let i = INITIAL_CHUNK; i < TOTAL_FRAMES; i++) {
-            loadSingleImage(i);
-          }
-        })
-      : setTimeout(() => {
-          for (let i = INITIAL_CHUNK; i < TOTAL_FRAMES; i++) {
-            loadSingleImage(i);
-          }
-        }, 300);
+    const resume = () => video.play().catch(() => {});
+    resume();
 
-    // Resize canvas to match display size & DPR
-    const handleResize = () => {
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = window.innerWidth * dpr;
-      canvas.height = window.innerHeight * dpr;
-      canvas.style.width = `${window.innerWidth}px`;
-      canvas.style.height = `${window.innerHeight}px`;
-    };
-
-    window.addEventListener('resize', handleResize);
-    handleResize();
-
-    // Render loop
-    const render = (timestamp) => {
-      if (!lastTimestamp) lastTimestamp = timestamp;
-      const elapsed = timestamp - lastTimestamp;
-
-      if (elapsed >= frameInterval) {
-        lastTimestamp = timestamp - (elapsed % frameInterval);
-
-        // Find best available frame (current, or nearest previously loaded)
-        let frameToDraw = images[currentFrameIndex];
-        if (!frameToDraw) {
-          // Look backwards for latest loaded frame to prevent any flicker
-          for (let k = currentFrameIndex - 1; k >= 0; k--) {
-            if (images[k]) {
-              frameToDraw = images[k];
-              break;
-            }
-          }
-        }
-
-        if (frameToDraw && frameToDraw.complete && frameToDraw.naturalWidth) {
-          const cw = canvas.width;
-          const ch = canvas.height;
-          const iw = frameToDraw.naturalWidth;
-          const ih = frameToDraw.naturalHeight;
-
-          // Object-fit: cover scaling
-          const scale = Math.max(cw / iw, ch / ih);
-          const dw = iw * scale;
-          const dh = ih * scale;
-          const dx = (cw - dw) / 2;
-          const dy = (ch - dh) / 2;
-
-          ctx.drawImage(frameToDraw, dx, dy, dw, dh);
-        }
-
-        // Advance to next frame
-        currentFrameIndex = (currentFrameIndex + 1) % TOTAL_FRAMES;
+    const handleVisibility = () => {
+      if (document.hidden) {
+        video.pause();
+      } else {
+        resume();
       }
-
-      animationFrameId = requestAnimationFrame(render);
     };
+    document.addEventListener('visibilitychange', handleVisibility);
 
-    animationFrameId = requestAnimationFrame(render);
-
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      cancelAnimationFrame(animationFrameId);
-      if (requestIdleCallback && idleId) cancelIdleCallback(idleId);
-      else clearTimeout(idleId);
-    };
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
   }, []);
 
   return (
     <div className="earth-bg-root">
-      {/* Canvas rendering sequential Earth frames with violet planetary color-grading */}
-      <canvas
-        ref={canvasRef}
-        className="earth-bg-canvas"
+      {/* Looping Earth footage; poster frame stands in until playback starts */}
+      <video
+        ref={videoRef}
+        className="earth-bg-video"
+        poster="/earth-poster.jpg"
+        autoPlay
+        loop
+        muted
+        playsInline
+        preload="auto"
+        aria-hidden="true"
+        tabIndex={-1}
         style={{
           filter: 'hue-rotate(242deg) saturate(135%) brightness(0.68) contrast(112%)',
         }}
-      />
+      >
+        <source src="/earth-loop.mp4" type="video/mp4" />
+      </video>
 
       {/* Atmospheric space vignette overlay for high contrast text readability */}
       <div

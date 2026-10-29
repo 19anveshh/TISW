@@ -115,6 +115,28 @@ graph state is used for completion, so final state updates cannot duplicate
 already emitted deltas. Hidden prompts, tool arguments, and credentials are
 not forwarded.
 
+Providers stream far faster than a person reads (Groq delivers roughly
+1,100 characters per second), and repainting on every chunk collapses into a
+few large updates. The web client therefore buffers deltas in
+`frontend/src/lib/streamPacer.js` and reveals them at ~70 characters per
+second, rising to at most ~140 while the buffer is ahead of the reader. The
+pacer never changes what is stored: `done` remains authoritative, a new
+message or thread switch reveals the remaining text immediately, and stopping
+generation cancels it. `frontend/test_stream_pacer.mjs` covers the pacing,
+finish, flush, and cancel paths.
+
+The transcript does not follow the stream. A new question is positioned once
+when it is sent, and the viewport then stays still while the answer grows, so
+long paragraphs no longer drag the page down or make the layout jitter. The
+shell is a single fixed viewport: the document itself never scrolls, only the
+message pane does.
+
+Message density follows a chat-transcript layout: questions keep a compact
+glass bubble, while answers render as plain text under a small `Tutor` label
+instead of a full-width card. Body text is 14.5 px at a 1.58 line height with
+tight paragraph, heading, and list margins, so a long answer shows about 15%
+more text per screen than the card layout it replaced.
+
 Conversation serialization and turn idempotency are process-local because the
 current sessions and `InMemorySaver` checkpointer are process-local. A
 multi-worker or multi-instance deployment needs shared durable checkpoint,
@@ -193,6 +215,25 @@ only those sources and to say when the uploaded documents do not cover an
 answer. Normal Mode remains natural; TISW Mode applies the existing structured
 teaching behavior to grounded material.
 
+## Persistence
+
+Conversations and uploaded documents survive a page reload and a backend
+restart:
+
+- Completed turns are stored in SQLite (`.data/tisw.db`, override with
+  `TISW_DB_PATH`) along with their citations, so the sidebar transcript and
+  source lists are restored exactly as they were.
+- Uploaded files are stored byte-for-byte and re-indexed into the hybrid
+  retriever the first time a new session asks for its documents.
+- When a reloaded thread is used again, its last 12 exchanges are replayed into
+  the fresh LangGraph checkpointer so the tutor keeps the conversation context.
+- History is scoped by a random `tisw.client_id` kept in `localStorage`. It is
+  a workspace partition, not an authentication credential: it never grants
+  access to API keys, and deleting the browser's local storage starts a clean
+  workspace.
+- Delete a conversation from the sidebar, or stop the server and remove
+  `.data/tisw.db` to clear everything.
+
 ## Security and isolation
 
 - `.env` is ignored by Git and `.env.example` contains placeholders only.
@@ -200,6 +241,8 @@ teaching behavior to grounded material.
   localStorage/sessionStorage.
 - Document routes require a server-issued opaque session token. Arbitrary
   browser-generated IDs are not accepted as document ownership.
+- The `X-Client-Id` used for persistence is an opaque browser identifier, not a
+  credential. It only selects rows in the local SQLite store.
 - Each token has its own LangGraph checkpointer and document index. Deleted
   documents are removed from metadata, vectors, and BM25 indexes.
 - Uploads are limited by extension, basic file signature, size, and document
@@ -258,9 +301,11 @@ response evaluation; no live model score is claimed when it is unavailable.
 ## Known limitations
 
 - FastEmbed downloads its model on first use and currently runs in-process.
-- Indexes and session tokens are memory-only and are lost on process restart.
+- Session tokens and in-memory retrieval indexes are lost on process restart.
+  Persisted chats and document bytes are reloaded from SQLite, but restoring a
+  document index re-embeds it on first use.
 - There is no persistent user account system yet; tokens are bearer sessions
-  with a two-hour TTL.
+  with a two-hour TTL, and history is scoped per browser rather than per login.
 - The live Groq response path still requires a valid configured key and was not
   substituted with a fake model in production.
 
@@ -270,6 +315,7 @@ response evaluation; no live model score is claimed when it is unavailable.
 TISW/
 ├── main.py                    # LangGraph tutor and response modes
 ├── server.py                  # FastAPI routes and session boundary
+├── persistence.py             # SQLite store for chats and document bytes
 ├── rag_engine.py              # Extraction, chunking, indexes, hybrid RAG
 ├── test_rag_features.py       # Offline RAG unit coverage
 ├── test_rag_pipeline.py      # End-to-end RAG pipeline checks

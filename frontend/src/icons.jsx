@@ -159,7 +159,7 @@ export const Trash2 = createIcon([
 ]);
 
 export const Database = createIcon([
-  "ellipse cx='12' cy='5' rx='9' ry='3'",
+  "M3 5a9 3 0 1 0 18 0a9 3 0 1 0-18 0",
   "M3 5v14a9 3 0 0 0 18 0V5",
   "M3 12a9 3 0 0 0 18 0"
 ]);

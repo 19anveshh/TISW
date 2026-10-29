@@ -383,7 +383,12 @@ class SessionDocumentIndex:
         self.embeddings: Optional[np.ndarray] = None      # 2D normalized float32 array
         self.bm25: Optional[BM25Okapi] = None
 
-    def add_document(self, filename: str, file_bytes: bytes) -> DocumentMetadata:
+    def add_document(
+        self,
+        filename: str,
+        file_bytes: bytes,
+        doc_id: Optional[str] = None,
+    ) -> DocumentMetadata:
         """Parses, chunks, embeds, and indexes a new document into this session."""
         with self.lock:
             if len(self.documents) >= MAX_FILES_PER_SESSION:
@@ -397,7 +402,7 @@ class SessionDocumentIndex:
                     f"File size ({size_mb} MB) exceeds maximum allowed size ({MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB)."
                 )
 
-            doc_id = str(uuid.uuid4())[:8]
+            doc_id = doc_id or str(uuid.uuid4())[:8]
             sections = extract_text_from_file(filename, file_bytes)
             new_chunks = chunk_document(doc_id, filename, sections)
 

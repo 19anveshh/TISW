@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Plus, X, Send, Paperclip, RefreshCw, BookOpen, ChevronDown, ArrowUpRight, Activity
+  Plus, X, Send, Paperclip, RefreshCw, BookOpen, ChevronDown, ArrowUpRight, Activity, Trash2
 } from './icons';
 import EarthBackground from './EarthBackground';
 import MarkdownRenderer from './components/MarkdownRenderer';
@@ -8,9 +8,34 @@ import FileDropZone from './components/FileDropZone';
 import DocumentManager from './components/DocumentManager';
 import SourceCitations from './components/SourceCitations';
 import Toast from './components/Toast';
+import AboutSheet from './components/AboutSheet';
 import CinematicIntro from './components/CinematicIntro';
-import { streamChatMessage, checkHealth, getRuntimeStatus, verifyGroqKey, createServerSession, fetchDocuments, isActiveStreamRequest } from './lib/api';
-import { createTurnMessages, updateAssistantMessage } from './lib/messageState';
+import {
+  streamChatMessage,
+  checkHealth,
+  getRuntimeStatus,
+  verifyGroqKey,
+  createServerSession,
+  fetchDocuments,
+  fetchThreads,
+  fetchThreadMessages,
+  deleteThread,
+  isActiveStreamRequest,
+} from './lib/api';
+import { createTurnMessages, updateAssistantMessage, messagesFromHistory } from './lib/messageState';
+import { createStreamPacer } from './lib/streamPacer';
+
+const ACTIVE_THREAD_KEY = 'tisw.active_thread';
+
+function toThreadEntry(row) {
+  return {
+    id: row.thread_id,
+    label: row.label || 'New Session',
+    messageCount: row.message_count || 0,
+    createdAt: Math.round((row.created_at || 0) * 1000),
+    updatedAt: Math.round((row.updated_at || 0) * 1000),
+  };
+}
 
 // ============================================================================
 // Eye icon (show/hide password)
@@ -230,6 +255,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen]   = useState(false);
   const [toast, setToast]               = useState(null);
   const [toastType, setToastType]       = useState('info');
+  const [aboutOpen, setAboutOpen]       = useState(false);
   const [backendStatus, setBackendStatus] = useState('checking');
   const [showFileZone, setShowFileZone] = useState(false);
 
@@ -241,15 +267,65 @@ export default function App() {
     createdAt: Date.now(),
   }]);
 
-  const chatEndRef  = useRef(null);
+  const messagesScrollRef = useRef(null);
+  const anchoredUserMessageRef = useRef(null);
   const textareaRef = useRef(null);
+  const aboutButtonRef = useRef(null);
   const activeRequestRef = useRef(null);
+  const pacerRef = useRef(null);
   const retryTurnRef = useRef(null);
   const messagesByThreadRef = useRef(new Map([[initialThreadId, []]]));
+  const loadedThreadsRef = useRef(new Set([initialThreadId]));
+  const threadIdRef = useRef(initialThreadId);
+  const hasLocalActivityRef = useRef(false);
+  // Captured before the threadId effect writes the freshly generated id.
+  const [preferredThreadId] = useState(() => {
+    try {
+      return localStorage.getItem(ACTIVE_THREAD_KEY);
+    } catch {
+      return null;
+    }
+  });
 
   useEffect(() => {
     messagesByThreadRef.current.set(threadId, messages);
   }, [threadId, messages]);
+
+  useEffect(() => {
+    threadIdRef.current = threadId;
+    try {
+      localStorage.setItem(ACTIVE_THREAD_KEY, threadId);
+    } catch {
+      // Private-mode storage failures only disable restore, never the chat.
+    }
+  }, [threadId]);
+
+  // Restore the most recent stored conversation after a reload.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await fetchThreads();
+        if (cancelled) return;
+        const stored = (data.threads || []).map(toThreadEntry);
+        if (stored.length === 0) return;
+        const active = stored.find((thread) => thread.id === preferredThreadId) || stored[0];
+        const transcript = await fetchThreadMessages(active.id);
+        if (cancelled || hasLocalActivityRef.current) return;
+        const restored = messagesFromHistory(transcript.messages || []);
+        messagesByThreadRef.current.set(active.id, restored);
+        loadedThreadsRef.current.add(active.id);
+        setThreads(stored);
+        setThreadId(active.id);
+        setMessages(restored);
+      } catch {
+        // History is optional: keep the fresh local session if it is unavailable.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [preferredThreadId]);
 
   // --- Toast helper ---
   const triggerToast = useCallback((msg, type = 'info') => {
@@ -272,10 +348,23 @@ export default function App() {
     }
   }, [updateSessionToken]);
 
-  // --- Auto-scroll ---
+  // --- Scroll anchor ---
+  // Position a new question once, then leave the scroll position alone while the
+  // answer streams: following every delta is what made the page crawl and jitter.
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isLoading]);
+    const lastUser = [...messages].reverse().find((msg) => msg.role === 'user');
+    if (!lastUser || anchoredUserMessageRef.current === lastUser.id) return;
+    anchoredUserMessageRef.current = lastUser.id;
+    const container = messagesScrollRef.current;
+    const row = document.querySelector(`[data-message-id="${lastUser.id}"]`);
+    if (!container || !row) return;
+    const containerRect = container.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const offsetFromTop = rowRect.top - containerRect.top;
+    if (offsetFromTop <= container.clientHeight * 0.4) return;
+    // One instant move at send time; nothing animates while the answer streams.
+    container.scrollTo({ top: container.scrollTop + offsetFromTop - 24 });
+  }, [messages]);
 
   // --- Backend health check ---
   useEffect(() => {
@@ -308,6 +397,8 @@ export default function App() {
     if (!request) return;
     activeRequestRef.current = null;
     request.controller.abort();
+    pacerRef.current?.cancel();
+    pacerRef.current = null;
     retryTurnRef.current = {
       threadId: request.threadId,
       turnId: request.turnId,
@@ -332,9 +423,18 @@ export default function App() {
     triggerToast('Generation stopped', 'info');
   }, [triggerToast]);
 
+  // Reveal any text still being paced so the reader never leaves a half-typed turn.
+  const flushPacing = useCallback(() => {
+    const pacer = pacerRef.current;
+    pacerRef.current = null;
+    pacer?.flush();
+  }, []);
+
   const handleSend = useCallback(async (customText = null, retryTurn = null) => {
     const textToSend = (customText !== null ? customText : prompt).trim();
     if (!textToSend || isLoading) return;
+    hasLocalActivityRef.current = true;
+    flushPacing();
 
     if (customText === null) setPrompt('');
 
@@ -388,11 +488,37 @@ export default function App() {
       );
     }
 
-    let completed = false;
+    let streamCompleted = false;
     const updateAssistant = (update) => {
       if (!isActiveStreamRequest(activeRequestRef.current, requestId, requestThreadId)) return;
       setMessages((prev) => updateAssistantMessage(prev, assistantMessageId, update));
     };
+    // Message ids are request-scoped, so a late update after a thread switch is a no-op.
+    const applyAssistant = (update) => {
+      setMessages((prev) => updateAssistantMessage(prev, assistantMessageId, update));
+    };
+
+    let donePayload = null;
+    const pacer = createStreamPacer({
+      onReveal: (text) => applyAssistant({ content: text }),
+      onDone: () => {
+        if (pacerRef.current === pacer) pacerRef.current = null;
+        const data = donePayload;
+        donePayload = null;
+        if (!data) {
+          applyAssistant({ isStreaming: false });
+          return;
+        }
+        applyAssistant({
+          content: typeof data.response === 'string' ? data.response : '',
+          isStreaming: false,
+          retryable: false,
+          rag_used: Boolean(data.rag_used),
+          sources: data.sources || [],
+        });
+      },
+    });
+    pacerRef.current = pacer;
 
     try {
       await streamChatMessage({
@@ -403,26 +529,23 @@ export default function App() {
         ragEnabled,
         tracingEnabled: Boolean(tracingPreference && runtimeStatus.tracingAvailable && !runtimeStatus.offline),
         signal: controller.signal,
-        onDelta: (text) => updateAssistant((msg) => ({ content: `${msg.content}${text}` })),
+        onDelta: (text) => pacer.push(text),
         onSources: (sources) => updateAssistant({ sources, rag_used: sources.length > 0 }),
         onDone: (data) => {
-          completed = true;
-          updateAssistant({
-            content: typeof data.response === 'string' ? data.response : '',
-            isStreaming: false,
-            retryable: false,
-            rag_used: Boolean(data.rag_used),
-            sources: data.sources || [],
-          });
+          streamCompleted = true;
+          donePayload = data;
           if (data.thread_id) setThreadId(data.thread_id);
           setBackendStatus('connected');
+          pacer.finish(typeof data.response === 'string' ? data.response : undefined);
         },
       });
-      if (!completed && isActiveStreamRequest(activeRequestRef.current, requestId, requestThreadId)) {
+      if (!streamCompleted && isActiveStreamRequest(activeRequestRef.current, requestId, requestThreadId)) {
         throw new Error('The tutor stream ended before completion.');
       }
     } catch (err) {
       if (controller.signal.aborted || err.name === 'AbortError') return;
+      pacer.cancel();
+      if (pacerRef.current === pacer) pacerRef.current = null;
       const errorMsg = err.message || 'Failed to reach tutor backend.';
       retryTurnRef.current = {
         threadId: requestThreadId,
@@ -461,17 +584,20 @@ export default function App() {
         setIsLoading(false);
       }
     }
-  }, [prompt, threadId, isLoading, triggerToast, sessionToken, ragEnabled, tracingPreference, runtimeStatus, updateSessionToken, establishServerSession]);
+  }, [prompt, threadId, isLoading, triggerToast, sessionToken, ragEnabled, tracingPreference, runtimeStatus, updateSessionToken, establishServerSession, flushPacing]);
 
   // =========================================================================
   // NEW CHAT / RESET SESSION
   // =========================================================================
   const handleNewSession = useCallback(() => {
+    hasLocalActivityRef.current = true;
     handleStopGeneration(false);
+    flushPacing();
     const newId = `study-session-${crypto.randomUUID().slice(0, 8)}`;
     setThreadId(newId);
     setMessages([]);
     messagesByThreadRef.current.set(newId, []);
+    loadedThreadsRef.current.add(newId);
     setPrompt('');
     setIsLoading(false);
     setThreads((prev) => [
@@ -479,7 +605,54 @@ export default function App() {
       ...prev,
     ]);
     triggerToast('Started fresh session', 'success');
-  }, [handleStopGeneration, triggerToast]);
+  }, [handleStopGeneration, flushPacing, triggerToast]);
+
+  const handleSelectThread = useCallback(async (thread) => {
+    setSidebarOpen(false);
+    if (thread.id === threadIdRef.current) return;
+    hasLocalActivityRef.current = true;
+    handleStopGeneration(false);
+    flushPacing();
+    setPrompt('');
+    const cached = loadedThreadsRef.current.has(thread.id)
+      ? messagesByThreadRef.current.get(thread.id)
+      : null;
+    setThreadId(thread.id);
+    setMessages(cached || []);
+    if (cached) return;
+    try {
+      const data = await fetchThreadMessages(thread.id);
+      if (threadIdRef.current !== thread.id) return;
+      const restored = messagesFromHistory(data.messages || []);
+      messagesByThreadRef.current.set(thread.id, restored);
+      loadedThreadsRef.current.add(thread.id);
+      setMessages(restored);
+    } catch {
+      if (threadIdRef.current === thread.id) {
+        triggerToast('Could not load that conversation', 'error');
+      }
+    }
+  }, [handleStopGeneration, flushPacing, triggerToast]);
+
+  const handleDeleteThread = useCallback(async (thread) => {
+    try {
+      await deleteThread(thread.id);
+    } catch (err) {
+      // A locally created thread that never reached the server is still removable.
+      if (err.status !== 404) {
+        triggerToast('Could not delete that conversation', 'error');
+        return;
+      }
+    }
+    messagesByThreadRef.current.delete(thread.id);
+    loadedThreadsRef.current.delete(thread.id);
+    setThreads((prev) => prev.filter((item) => item.id !== thread.id));
+    if (threadIdRef.current === thread.id) {
+      handleNewSession();
+    } else {
+      triggerToast('Conversation deleted', 'info');
+    }
+  }, [handleNewSession, triggerToast]);
 
   const handleTracingToggle = useCallback(() => {
     if (runtimeStatus.offline || !runtimeStatus.tracingAvailable) {
@@ -571,24 +744,36 @@ export default function App() {
         {/* Session History */}
         <div className="sidebar-threads">
           <div className="sidebar-section-label">History</div>
-          {threads.map((thread) => (
-            <button
-              key={thread.id}
-              type="button"
-              className={`thread-item ${thread.id === threadId ? 'thread-item--active' : ''}`}
-              onClick={() => {
-                handleStopGeneration(false);
-                const nextMessages = messagesByThreadRef.current.get(thread.id) || [];
-                setThreadId(thread.id);
-                setMessages(nextMessages);
-                setPrompt('');
-                setSidebarOpen(false);
-              }}
-            >
-              <BookOpen className="w-3.5 h-3.5" />
-              <span className="thread-label">{thread.label}</span>
-            </button>
-          ))}
+          {threads.map((thread) => {
+            const isActive = thread.id === threadId;
+            return (
+              <div
+                key={thread.id}
+                className={`thread-item ${isActive ? 'thread-item--active' : ''}`}
+              >
+                <button
+                  type="button"
+                  className="thread-open"
+                  onClick={() => handleSelectThread(thread)}
+                  aria-current={isActive ? 'true' : undefined}
+                >
+                  <BookOpen className="w-3.5 h-3.5" />
+                  <span className="thread-label">{thread.label}</span>
+                </button>
+                {thread.messageCount > 0 && (
+                  <button
+                    type="button"
+                    className="thread-delete"
+                    onClick={() => handleDeleteThread(thread)}
+                    title="Delete conversation"
+                    aria-label={`Delete ${thread.label}`}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
       </aside>
 
@@ -605,7 +790,7 @@ export default function App() {
           </div>
 
           <nav className="header-nav">
-            <button type="button" className="nav-link" onClick={() => triggerToast('A clear, conversational AI study assistant powered by Groq.', 'info')}>
+            <button ref={aboutButtonRef} type="button" className="nav-link" onClick={() => setAboutOpen(true)}>
               About
             </button>
             <button
@@ -718,10 +903,11 @@ export default function App() {
           )}
 
           {hasMessages && (
-            <div className="messages-container">
+            <div className="messages-container" ref={messagesScrollRef}>
               {messages.map((msg, index) => (
                 <div
                   key={msg.id || index}
+                  data-message-id={msg.id}
                   className={`message-row ${msg.role === 'user' ? 'message-row--user' : 'message-row--assistant'} animate-fadeIn`}
                 >
                   {msg.role === 'user' ? (
@@ -770,8 +956,6 @@ export default function App() {
                   )}
                 </div>
               ))}
-
-              <div ref={chatEndRef} />
             </div>
           )}
         </main>
@@ -854,6 +1038,14 @@ export default function App() {
       </div>
 
         <Toast message={toast} type={toastType} />
+        {aboutOpen && (
+          <AboutSheet
+            onClose={() => {
+              setAboutOpen(false);
+              aboutButtonRef.current?.focus();
+            }}
+          />
+        )}
       </div>
     </>
   );

@@ -19,6 +19,9 @@ venv/
 .venv/
 ENV/
 
+# Local SQLite conversation/document store
+.data/
+
 # Node / Frontend
 node_modules/
 frontend/node_modules/
