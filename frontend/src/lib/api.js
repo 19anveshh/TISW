@@ -340,7 +340,7 @@ export async function uploadFile(file, sessionToken) {
 
   const headers = sessionHeaders(sessionToken);
 
-  const res = await fetch(`${API_BASE}/api/upload`, {
+  const res = await fetchReachable(`${API_BASE}/api/upload`, {
     method: "POST",
     headers,
     body: formData,

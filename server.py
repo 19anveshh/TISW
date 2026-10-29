@@ -49,6 +49,7 @@ import hashlib
 import asyncio
 import copy
 import re
+import threading
 import traceback
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from dataclasses import dataclass
@@ -100,6 +101,7 @@ from main import (
 from rag_engine import (
     get_session_document_index,
     prune_session_index,
+    prewarm_embedding_model,
     SUPPORTED_EXTENSIONS,
     FINAL_TOP_K,
     MAX_FILE_SIZE_BYTES,
@@ -258,7 +260,25 @@ def _restore_documents_for_session(session_id: str, entry: _SessionEntry) -> Non
 # APP SETUP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-app = FastAPI(title="TISW AI Tutor Backend", version="3.1.0")
+def _prewarm_rag() -> None:
+    started = time.perf_counter()
+    try:
+        prewarm_embedding_model()
+        print(f"[INIT] Embedding model ready for uploads in {time.perf_counter() - started:.1f}s.")
+    except Exception as exc:
+        print(f"[INIT] Embedding prewarm failed: {type(exc).__name__}", file=sys.stderr)
+
+
+@asynccontextmanager
+async def _rag_lifespan(_app: FastAPI):
+    # A background thread so boot stays fast and a failed download never blocks
+    # chat; uploads that arrive early still work, they just pay the load once.
+    if not is_offline_mode():
+        threading.Thread(target=_prewarm_rag, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="TISW AI Tutor Backend", version="3.1.0", lifespan=_rag_lifespan)
 
 _allowed_origins = [
     origin.strip()

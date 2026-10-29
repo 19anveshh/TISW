@@ -2,6 +2,11 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { FileText, Trash2, Database, Plus, RefreshCw } from '../icons';
 import { fetchDocuments, deleteDocument, uploadFile } from '../lib/api';
 
+// Mirrors rag_engine's MAX_FILE_SIZE_BYTES and MAX_FILES_PER_SESSION; the server
+// still enforces both, this only stops a doomed upload from leaving the browser.
+const MAX_FILE_BYTES = 15 * 1024 * 1024;
+const MAX_DOCS_PER_SESSION = 10;
+
 /**
  * DocumentManager — Sidebar section for toggling RAG and managing uploaded documents.
  * Strict per-session isolation via a server-issued sessionToken.
@@ -52,6 +57,14 @@ export default function DocumentManager({
     const ext = '.' + (file.name.split('.').pop() || '').toLowerCase();
     if (!['.pdf', '.docx', '.txt'].includes(ext)) {
       onToast?.(`Unsupported file type '${ext}'. Please upload a .pdf, .docx, or .txt file.`, 'error');
+      return;
+    }
+    if (file.size > MAX_FILE_BYTES) {
+      onToast?.(`'${file.name}' is ${(file.size / 1048576).toFixed(1)} MB — the limit is 15 MB.`, 'error');
+      return;
+    }
+    if (documents.length >= MAX_DOCS_PER_SESSION) {
+      onToast?.('Upload limit reached (10 documents). Remove one before adding another.', 'error');
       return;
     }
 

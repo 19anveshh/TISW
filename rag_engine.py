@@ -121,6 +121,20 @@ def get_embedding_model() -> TextEmbedding:
     return _embedding_model
 
 
+def prewarm_embedding_model() -> None:
+    """
+    Loads the embedding model and runs one throwaway embedding.
+
+    Render's filesystem is ephemeral, so a cold container holds no model cache:
+    without this, the first upload of every deploy spends the request downloading
+    ~65 MB and building the ONNX session on 0.1 CPU, which is how uploads end as
+    a browser-side 'Failed to fetch'.
+    """
+    model = get_embedding_model()
+    for _ in model.embed(["prewarm"]):
+        break
+
+
 # =====================================================================
 # TEXT EXTRACTION & CHUNKING
 # =====================================================================
