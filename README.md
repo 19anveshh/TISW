@@ -206,6 +206,12 @@ thread, so it follows reloads and re-issued sessions that replay history.
 Page-level details are also kept server-side; no extra planning model call is
 made, so paging costs no additional input tokens.
 
+Paged answers work with RAG. `/continue`, `/next`, and `/all` carry no topic of
+their own, so they retrieve against the walkthrough's stored topic and keep the
+same citations as part 1. If the session has no documents at that moment, the
+part is still delivered — ungrounded — rather than replaced by an upload
+warning.
+
 ## Document RAG
 
 ### Enable and disable

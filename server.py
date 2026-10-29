@@ -90,6 +90,7 @@ from main import (
     detect_mode_command,
     detect_persistent_preference,
     is_paging_control,
+    paging_delivery_kind,
     paging_payload,
     parse_slash_command,
     TISW_BEATS,
@@ -450,6 +451,11 @@ def enrich_message(user_text: str, mode: Optional[str] = None) -> str:
 
 def _build_retrieval_query(graph: Any, config: Dict[str, Any], user_text: str) -> str:
     """Add recent context for short/ambiguous follow-ups without changing the prompt."""
+    slash = parse_slash_command(user_text)
+    if slash and slash[1]:
+        # The topic after "/tisw" is the query; the command itself is not content.
+        return slash[1]
+
     lowered = user_text.lower().strip()
     words = lowered.split()
     follow_up_markers = (
@@ -884,14 +890,18 @@ def _prepare_chat_execution(
         current_mode,
         int(snapshot.get("tisw_part") or 0),
     )
+    paging_topic = str(snapshot.get("tisw_topic") or "").strip()
+    # "continue" carries no topic of its own, so a continuation retrieves the
+    # material its walkthrough was started from instead of the word "continue".
+    grounded_continuation = bool(rag_enabled and paging_control and paging_delivery_kind(user_text) and paging_topic)
+    use_rag = rag_enabled and (not paging_control or grounded_continuation)
 
-    if paging_control:
-        invoke_payload = {"messages": [HumanMessage(content=enriched)], "rag_context": None}
-    elif rag_enabled:
+    invoke_payload = {"messages": [HumanMessage(content=enriched)], "rag_context": None}
+    if use_rag:
         session_id = _require_session_token(session_token)
         _restore_documents_for_session(session_id, _resolve_session(session_id))
         doc_index = get_session_document_index(session_id)
-        if len(doc_index.documents) == 0:
+        if len(doc_index.documents) == 0 and not paging_control:
             early = ChatResponse(
                 response="⚠️ **RAG is enabled, but no documents have been uploaded yet.**\n\n"
                          "Please upload a PDF, DOCX, or TXT document using the paperclip or document manager in the sidebar before querying your documents.",
@@ -916,29 +926,33 @@ def _prepare_chat_execution(
                 "trace_requested": bool(payload.tracing_enabled),
             }
 
-        retrieval_query = _build_retrieval_query(graph, config_base, user_text)
-        retrieved_chunks = doc_index.hybrid_search(query=retrieval_query, final_top_k=FINAL_TOP_K)
-        if retrieved_chunks:
-            rag_used = True
-            context_blocks = []
-            for i, chunk in enumerate(retrieved_chunks, start=1):
-                page_info = f", Page {chunk.page_number}" if chunk.page_number is not None else ""
-                context_blocks.append(
-                    f"--- EXCERPT {i} ---\n[Source: {chunk.filename}{page_info} | Chunk ID: {chunk.chunk_id}]\n{chunk.text}"
-                )
-                snippet = chunk.text[:220].strip() + ("…" if len(chunk.text) > 220 else "")
-                sources.append(SourceItem(
-                    filename=chunk.filename,
-                    page_number=chunk.page_number,
-                    chunk_id=chunk.chunk_id,
-                    snippet=snippet,
-                ))
-            rag_context_str = "\n\n".join(context_blocks)
-        else:
-            rag_context_str = "[No relevant excerpts were found in the uploaded documents for this question.]"
-        invoke_payload = {"messages": [HumanMessage(content=enriched)], "rag_context": rag_context_str}
-    else:
-        invoke_payload = {"messages": [HumanMessage(content=enriched)], "rag_context": None}
+        # An empty session mid-walkthrough must not be interrupted by an upload
+        # warning, so the part is delivered ungrounded instead.
+        if doc_index.documents:
+            retrieval_query = (
+                paging_topic if paging_control
+                else _build_retrieval_query(graph, config_base, user_text)
+            )
+            retrieved_chunks = doc_index.hybrid_search(query=retrieval_query, final_top_k=FINAL_TOP_K)
+            if retrieved_chunks:
+                rag_used = True
+                context_blocks = []
+                for i, chunk in enumerate(retrieved_chunks, start=1):
+                    page_info = f", Page {chunk.page_number}" if chunk.page_number is not None else ""
+                    context_blocks.append(
+                        f"--- EXCERPT {i} ---\n[Source: {chunk.filename}{page_info} | Chunk ID: {chunk.chunk_id}]\n{chunk.text}"
+                    )
+                    snippet = chunk.text[:220].strip() + ("…" if len(chunk.text) > 220 else "")
+                    sources.append(SourceItem(
+                        filename=chunk.filename,
+                        page_number=chunk.page_number,
+                        chunk_id=chunk.chunk_id,
+                        snippet=snippet,
+                    ))
+                rag_context_str = "\n\n".join(context_blocks)
+            else:
+                rag_context_str = "[No relevant excerpts were found in the uploaded documents for this question.]"
+            invoke_payload = {"messages": [HumanMessage(content=enriched)], "rag_context": rag_context_str}
 
     metadata = {
         "application": "TISW",

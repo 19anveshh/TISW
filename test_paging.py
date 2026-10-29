@@ -261,8 +261,111 @@ def run_api_tests():
     print("OK: API responses and stored transcripts expose walkthrough parts")
 
 
+def run_rag_continuation_test():
+    class Chunk:
+        filename = "notes.pdf"
+        page_number = 3
+        chunk_id = "notes.pdf:3:0"
+        text = "A binary search halves the remaining range on every comparison."
+
+    class FakeIndex:
+        documents = {"doc1": object()}
+
+        def __init__(self):
+            self.queries = []
+
+        def hybrid_search(self, query, final_top_k):
+            self.queries.append(query)
+            return [Chunk()]
+
+    class CapturingLLM(FakeLLM):
+        def invoke(self, messages):
+            self.calls.append(messages)
+            return AIMessage(content="part two, grounded")
+
+    client = TestClient(server.app)
+    index = FakeIndex()
+    llm = CapturingLLM()
+    token = server._issue_session_token("gsk_paging_test", "test-model")
+    headers = {"X-Session-Token": token, "X-Client-Id": "pagingclient02"}
+    try:
+        with patch.object(server, "is_offline_mode", return_value=False), \
+             patch.object(server, "_build_llm_for_session", return_value=llm), \
+             patch.object(server, "get_session_document_index", return_value=index), \
+             patch.object(server, "_restore_documents_for_session"):
+            started = client.post(
+                "/api/chat",
+                json={
+                    "message": "/tisw explain binary search",
+                    "thread_id": "api-rag-paging",
+                    "turn_id": "r1",
+                    "rag_enabled": True,
+                },
+                headers=headers,
+            )
+            assert started.status_code == 200, started.text
+            assert index.queries == ["explain binary search"], index.queries
+            assert started.json()["rag_used"] is True
+
+            nxt = client.post(
+                "/api/chat",
+                json={
+                    "message": "/continue",
+                    "thread_id": "api-rag-paging",
+                    "turn_id": "r2",
+                    "rag_enabled": True,
+                },
+                headers=headers,
+            )
+            assert nxt.status_code == 200, nxt.text
+            part_two = nxt.json()
+            assert part_two["paging"]["part"] == 2
+            assert index.queries[-1] == "explain binary search", index.queries
+            assert part_two["rag_used"] is True
+            assert part_two["sources"][0]["filename"] == "notes.pdf"
+            system_text = str(llm.calls[-1][0].content)
+            assert "EXCERPT 1" in system_text
+            assert "notes.pdf" in system_text
+
+        empty_index = FakeIndex()
+        empty_index.documents = {}
+        with patch.object(server, "is_offline_mode", return_value=False), \
+             patch.object(server, "_build_llm_for_session", return_value=FakeLLM()), \
+             patch.object(server, "get_session_document_index", return_value=empty_index), \
+             patch.object(server, "_restore_documents_for_session"):
+            began = client.post(
+                "/api/chat",
+                json={"message": "/tisw explain binary search", "thread_id": "api-rag-empty", "turn_id": "e1"},
+                headers=headers,
+            )
+            assert began.json()["paging"]["part"] == 1
+
+            # Documents vanished mid-walkthrough: still advance instead of
+            # interrupting the walkthrough with an upload warning.
+            ungrounded = client.post(
+                "/api/chat",
+                json={
+                    "message": "/continue",
+                    "thread_id": "api-rag-empty",
+                    "turn_id": "e2",
+                    "rag_enabled": True,
+                },
+                headers=headers,
+            )
+            assert ungrounded.status_code == 200, ungrounded.text
+            body = ungrounded.json()
+            assert body["paging"]["part"] == 2
+            assert body["rag_used"] is False
+            assert "upload" not in body["response"].lower()
+            assert empty_index.queries == []
+    finally:
+        server._session_store.pop(token, None)
+    print("OK: continuations stay grounded in the walkthrough topic and survive an empty document set")
+
+
 if __name__ == "__main__":
     run_command_tests()
     run_graph_tests()
     run_stream_payload_test()
     run_api_tests()
+    run_rag_continuation_test()

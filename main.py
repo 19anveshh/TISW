@@ -253,6 +253,28 @@ def is_paging_control(user_text: str, current_mode: str = "normal", part: int = 
     return False
 
 
+def paging_delivery_kind(user_text: str) -> Optional[str]:
+    """Which paged delivery a steering message asks for, when it asks for one.
+
+    "continue"/"next" returns "continue" and "all"/"give me all" returns "all".
+    Mode commands and ordinary questions return None.
+    """
+    slash = parse_slash_command(user_text)
+    if slash:
+        command = slash[0]
+        if command in {"continue", "next"}:
+            return "continue"
+        if command == "all":
+            return "all"
+        return None
+    normalized = _normalized_for_command(user_text)
+    if normalized in _CONTINUE_TEXTS:
+        return "continue"
+    if normalized in _ALL_TEXTS:
+        return "all"
+    return None
+
+
 RAG_GROUNDING_PROMPT = """
 # RETRIEVED DOCUMENT CONTEXT & GROUNDING GUIDELINES
 The following context excerpts were retrieved from the student's uploaded study documents.
