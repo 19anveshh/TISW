@@ -12,9 +12,9 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(4, 3, 9, 0.33);
-  backdrop-filter: blur(16px) saturate(120%);
-  -webkit-backdrop-filter: blur(16px) saturate(120%);
+  background: rgba(4, 3, 9, 0.55);
+  backdrop-filter: blur(22px) saturate(125%);
+  -webkit-backdrop-filter: blur(22px) saturate(125%);
   animation: sheetOverlayIn 220ms ease both;
 }
 
@@ -84,10 +84,10 @@
   border-radius: 24px;
   border: 1px solid rgba(255, 255, 255, 0.22);
   background:
-    linear-gradient(160deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.035) 55%, rgba(255, 255, 255, 0.06) 100%),
-    rgba(16, 13, 24, 0.34);
-  backdrop-filter: blur(38px) saturate(165%);
-  -webkit-backdrop-filter: blur(38px) saturate(165%);
+    linear-gradient(160deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.045) 55%, rgba(255, 255, 255, 0.075) 100%),
+    rgba(14, 11, 22, 0.86);
+  backdrop-filter: blur(44px) saturate(165%);
+  -webkit-backdrop-filter: blur(44px) saturate(165%);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.2),
     0 30px 90px rgba(0, 0, 0, 0.5),
