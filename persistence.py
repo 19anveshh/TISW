@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS messages (
     content     TEXT NOT NULL,
     sources     TEXT,
     rag_used    INTEGER NOT NULL DEFAULT 0,
+    paging      TEXT,
     created_at  REAL NOT NULL,
     UNIQUE (client_id, thread_id, turn_id, role)
 );
@@ -81,9 +82,17 @@ def _connection() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     conn.commit()
     _conn = conn
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after a database was first created."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    if "paging" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN paging TEXT")
 
 
 def _thread_label(user_text: str) -> str:
@@ -100,12 +109,14 @@ def record_turn(
     *,
     sources: Optional[List[Dict[str, Any]]] = None,
     rag_used: bool = False,
+    paging: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Persist one completed turn. Safe to call twice for the same turn id."""
     if not client_id or not thread_id or not turn_id:
         return
     now = time.time()
     sources_json = json.dumps(sources or [], ensure_ascii=False)
+    paging_json = json.dumps(paging, ensure_ascii=False) if paging else None
     with _lock:
         conn = _connection()
         with conn:
@@ -117,13 +128,13 @@ def record_turn(
             )
             conn.executemany(
                 "INSERT OR IGNORE INTO messages "
-                "(client_id, thread_id, turn_id, role, content, sources, rag_used, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(client_id, thread_id, turn_id, role, content, sources, rag_used, paging, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    (client_id, thread_id, turn_id, "user", user_text, "[]", 0, now),
+                    (client_id, thread_id, turn_id, "user", user_text, "[]", 0, None, now),
                     (
                         client_id, thread_id, turn_id, "assistant", assistant_text,
-                        sources_json, 1 if rag_used else 0, now,
+                        sources_json, 1 if rag_used else 0, paging_json, now,
                     ),
                 ),
             )
@@ -149,7 +160,7 @@ def list_messages(client_id: str, thread_id: str) -> List[Dict[str, Any]]:
         return []
     with _lock:
         rows = _connection().execute(
-            "SELECT id, role, content, sources, rag_used, created_at "
+            "SELECT id, role, content, sources, rag_used, paging, created_at "
             "FROM messages WHERE client_id = ? AND thread_id = ? ORDER BY id ASC",
             (client_id, thread_id),
         ).fetchall()
@@ -160,6 +171,10 @@ def list_messages(client_id: str, thread_id: str) -> List[Dict[str, Any]]:
             item["sources"] = json.loads(row["sources"] or "[]")
         except (TypeError, ValueError):
             item["sources"] = []
+        try:
+            item["paging"] = json.loads(row["paging"]) if row["paging"] else None
+        except (TypeError, ValueError):
+            item["paging"] = None
         item["rag_used"] = bool(row["rag_used"])
         messages.append(item)
     return messages

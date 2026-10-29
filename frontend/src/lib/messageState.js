@@ -50,6 +50,7 @@ export function messagesFromHistory(rows = []) {
     content: row.content || '',
     sources: Array.isArray(row.sources) ? row.sources : [],
     rag_used: Boolean(row.rag_used),
+    paging: row.paging || null,
     timestamp: row.created_at ? Math.round(row.created_at * 1000) : undefined,
   }));
 }

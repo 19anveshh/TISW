@@ -37,6 +37,12 @@ function toThreadEntry(row) {
   };
 }
 
+/** A restored thread is in TISW mode when its latest answer was a walkthrough part. */
+function modeFromMessages(rows = []) {
+  const lastAssistant = [...rows].reverse().find((msg) => msg.role === 'assistant');
+  return lastAssistant?.paging ? 'tisw' : 'normal';
+}
+
 // ============================================================================
 // Eye icon (show/hide password)
 // ============================================================================
@@ -237,6 +243,7 @@ export default function App() {
   const [prompt, setPrompt]       = useState('');
   const [initialThreadId] = useState(() => `study-session-${crypto.randomUUID().slice(0, 8)}`);
   const [threadId, setThreadId]   = useState(initialThreadId);
+  const [activeMode, setActiveMode] = useState('normal');
   const [isLoading, setIsLoading] = useState(false);
   const [tracingPreference, setTracingPreference] = useState(() => localStorage.getItem('tisw.tracing') === 'true');
   const [runtimeStatus, setRuntimeStatus] = useState({ offline: true, tracingAvailable: false, status: 'checking' });
@@ -318,6 +325,7 @@ export default function App() {
         setThreads(stored);
         setThreadId(active.id);
         setMessages(restored);
+        setActiveMode(modeFromMessages(restored));
       } catch {
         // History is optional: keep the fresh local session if it is unavailable.
       }
@@ -515,6 +523,7 @@ export default function App() {
           retryable: false,
           rag_used: Boolean(data.rag_used),
           sources: data.sources || [],
+          paging: data.paging || null,
         });
       },
     });
@@ -529,11 +538,13 @@ export default function App() {
         ragEnabled,
         tracingEnabled: Boolean(tracingPreference && runtimeStatus.tracingAvailable && !runtimeStatus.offline),
         signal: controller.signal,
+        onStart: (data) => setActiveMode(data.mode === 'tisw' ? 'tisw' : 'normal'),
         onDelta: (text) => pacer.push(text),
         onSources: (sources) => updateAssistant({ sources, rag_used: sources.length > 0 }),
         onDone: (data) => {
           streamCompleted = true;
           donePayload = data;
+          if (data.mode) setActiveMode(data.mode === 'tisw' ? 'tisw' : 'normal');
           if (data.thread_id) setThreadId(data.thread_id);
           setBackendStatus('connected');
           pacer.finish(typeof data.response === 'string' ? data.response : undefined);
@@ -596,6 +607,7 @@ export default function App() {
     const newId = `study-session-${crypto.randomUUID().slice(0, 8)}`;
     setThreadId(newId);
     setMessages([]);
+    setActiveMode('normal');
     messagesByThreadRef.current.set(newId, []);
     loadedThreadsRef.current.add(newId);
     setPrompt('');
@@ -619,6 +631,7 @@ export default function App() {
       : null;
     setThreadId(thread.id);
     setMessages(cached || []);
+    setActiveMode(modeFromMessages(cached || []));
     if (cached) return;
     try {
       const data = await fetchThreadMessages(thread.id);
@@ -627,6 +640,7 @@ export default function App() {
       messagesByThreadRef.current.set(thread.id, restored);
       loadedThreadsRef.current.add(thread.id);
       setMessages(restored);
+      setActiveMode(modeFromMessages(restored));
     } catch {
       if (threadIdRef.current === thread.id) {
         triggerToast('Could not load that conversation', 'error');
@@ -673,6 +687,20 @@ export default function App() {
   }, [runtimeStatus, triggerToast]);
 
   const hasMessages = messages.length > 0;
+  const openWalkthrough = [...messages].reverse().find((msg) => msg.role === 'assistant')?.paging;
+
+  const composerPlaceholder = (() => {
+    if (!sessionToken) return 'Open the sidebar to configure your Groq API key...';
+    if (activeMode === 'tisw') {
+      return openWalkthrough && !openWalkthrough.complete
+        ? `/continue for part ${openWalkthrough.part + 1}, or ask a doubt…`
+        : 'Ask your topic — /normal to exit…';
+    }
+    if (ragEnabled) {
+      return `RAG Active (${documents.length} doc${documents.length === 1 ? '' : 's'}) — ask anything about your documents...`;
+    }
+    return 'Ask anything… or /tisw <topic>';
+  })();
 
   return (
     <>
@@ -918,6 +946,9 @@ export default function App() {
                     <div className={`message-bubble message-bubble--assistant ${msg.isError ? 'message-bubble--error' : ''}`}>
                       <div className="assistant-header">
                         <span className="assistant-label">Tutor</span>
+                        {msg.paging && (
+                          <span className="assistant-mode-badge tisw">TISW</span>
+                        )}
                         {msg.rag_used && (
                           <span className="assistant-mode-badge rag">RAG Grounded</span>
                         )}
@@ -935,6 +966,37 @@ export default function App() {
                          </>
                        )}
                        </div>
+                       {msg.paging && (
+                         <div className={`walkthrough-status ${msg.paging.complete ? 'walkthrough-status--complete' : ''}`}>
+                           <span className="walkthrough-part">
+                             Part {msg.paging.part} of {msg.paging.parts_total}
+                           </span>
+                           {msg.paging.title && !msg.paging.complete && (
+                             <span className="walkthrough-title">{msg.paging.title}</span>
+                           )}
+                           {msg.paging.complete && (
+                             <span className="walkthrough-title">Walkthrough complete</span>
+                           )}
+                         </div>
+                       )}
+                       {msg.paging && !msg.paging.complete && index === messages.length - 1 && !msg.isStreaming && !isLoading && (
+                         <div className="walkthrough-controls">
+                           <button
+                             type="button"
+                             className="walkthrough-btn walkthrough-btn--primary"
+                             onClick={() => handleSend('/continue')}
+                           >
+                             Continue
+                           </button>
+                           <button
+                             type="button"
+                             className="walkthrough-btn"
+                             onClick={() => handleSend('/all')}
+                           >
+                             Give me all
+                           </button>
+                         </div>
+                       )}
                        {msg.retryable && !isLoading && msg.retryMessage && (
                          <button
                            type="button"
@@ -980,6 +1042,24 @@ export default function App() {
             </div>
           )}
 
+          {activeMode === 'tisw' && (
+            <div className="input-mode-row">
+              <span className="input-mode-pill">
+                <span className="input-mode-dot" />
+                TISW walkthrough · 4 parts
+              </span>
+              <button
+                type="button"
+                className="input-mode-exit"
+                onClick={() => handleSend('/normal')}
+                disabled={isLoading}
+                title="Leave TISW mode"
+              >
+                Exit
+              </button>
+            </div>
+          )}
+
           <div className="input-card">
             <textarea
               ref={textareaRef}
@@ -992,13 +1072,7 @@ export default function App() {
                   handleSend();
                 }
               }}
-              placeholder={
-                !sessionToken
-                  ? 'Open the sidebar to configure your Groq API key...'
-                  : ragEnabled
-                  ? `RAG Active (${documents.length} doc${documents.length === 1 ? '' : 's'}) — ask anything about your documents...`
-                   : 'Ask anything…'
-              }
+              placeholder={composerPlaceholder}
               className="input-textarea"
               disabled={isLoading}
             />

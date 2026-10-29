@@ -89,6 +89,11 @@ from main import (
     detect_mode_request,
     detect_mode_command,
     detect_persistent_preference,
+    is_paging_control,
+    paging_payload,
+    parse_slash_command,
+    TISW_BEATS,
+    TISW_PARTS,
     _message_chunk_text,
 )
 from rag_engine import (
@@ -296,6 +301,13 @@ class SourceItem(BaseModel):
     chunk_id: str
     snippet: str
 
+class PagingInfo(BaseModel):
+    part: int = 0
+    parts_total: int = 4
+    title: Optional[str] = None
+    topic: Optional[str] = None
+    complete: bool = False
+
 class ChatRequest(BaseModel):
     message: str
     thread_id: Optional[str] = None
@@ -311,6 +323,7 @@ class ChatResponse(BaseModel):
     mode: str = "normal"
     rag_used: bool = False
     sources: Optional[List[SourceItem]] = None
+    paging: Optional[PagingInfo] = None
 
 class DocumentItem(BaseModel):
     doc_id: str
@@ -353,6 +366,7 @@ class StoredMessage(BaseModel):
     content: str
     sources: List[SourceItem] = []
     rag_used: bool = False
+    paging: Optional[PagingInfo] = None
     created_at: float
 
 class ThreadMessagesResponse(BaseModel):
@@ -510,6 +524,7 @@ def _persist_completed_turn(
             response.response,
             sources=[source.model_dump() for source in (response.sources or [])],
             rag_used=bool(response.rag_used),
+            paging=response.paging.model_dump() if response.paging else None,
         )
     except Exception as exc:
         print(f"[PERSIST ERROR] {type(exc).__name__}", file=sys.stderr)
@@ -853,8 +868,15 @@ def _prepare_chat_execution(
     rag_used = False
     sources: List[SourceItem] = []
     rag_context_str: Optional[str] = None
+    snapshot = snapshot_values or {}
+    pre_turn_paging = paging_payload({**snapshot, "active_mode": current_mode})
+    paging_control = is_paging_control(
+        user_text,
+        current_mode,
+        int(snapshot.get("tisw_part") or 0),
+    )
 
-    if detect_mode_command(user_text):
+    if paging_control:
         invoke_payload = {"messages": [HumanMessage(content=enriched)], "rag_context": None}
     elif rag_enabled:
         session_id = _require_session_token(session_token)
@@ -868,6 +890,7 @@ def _prepare_chat_execution(
                 mode=current_mode,
                 rag_used=False,
                 sources=[],
+                paging=pre_turn_paging and PagingInfo(**pre_turn_paging),
             )
             return {
                 "graph": graph,
@@ -943,6 +966,14 @@ def _sse_event(name: str, payload: dict[str, Any]) -> str:
     return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
+def _response_payload(response: ChatResponse) -> dict[str, Any]:
+    """Wire payload for one chat response; paging is omitted unless it applies."""
+    payload = response.model_dump()
+    if payload.get("paging") is None:
+        payload.pop("paging", None)
+    return payload
+
+
 def _final_response_from_output(output: Any) -> str:
     if not isinstance(output, dict):
         return ""
@@ -976,18 +1007,19 @@ def _extract_tutor_delta(event: Any) -> str:
 
 
 async def _replay_stream_events(record: _TurnRecord) -> AsyncIterator[str]:
-    response = _replay_response(record).model_dump()
+    response = _replay_response(record)
+    payload = _response_payload(response)
     yield _sse_event("start", {
         "request_id": uuid.uuid4().hex,
-        "thread_id": response["thread_id"],
-        "turn_id": response.get("turn_id"),
-        "mode": response.get("mode", "normal"),
+        "thread_id": payload["thread_id"],
+        "turn_id": payload.get("turn_id"),
+        "mode": payload.get("mode", "normal"),
         "tracing_enabled": False,
         "replay": True,
     })
-    if response.get("response"):
-        yield _sse_event("delta", {"text": response["response"]})
-    yield _sse_event("done", {**response, "replay": True})
+    if payload.get("response"):
+        yield _sse_event("delta", {"text": payload["response"]})
+    yield _sse_event("done", {**payload, "replay": True})
 
 
 async def _stream_chat_events(
@@ -1062,11 +1094,12 @@ async def _mock_stream_events(
         "It sends deterministic chunks through the same SSE protocol "
         "without initializing Groq or LangSmith."
     )
+    paging = _mock_paging(payload.message)
     yield _sse_event("start", {
         "request_id": request_id,
         "thread_id": thread_id,
         "turn_id": turn_id,
-        "mode": "normal",
+        "mode": "tisw" if paging else "normal",
         "tracing_enabled": False,
         "mock": True,
     })
@@ -1082,11 +1115,30 @@ async def _mock_stream_events(
         "response": answer,
         "thread_id": thread_id,
         "turn_id": turn_id,
-        "mode": "normal",
+        "mode": "tisw" if paging else "normal",
         "rag_used": False,
         "sources": [],
+        "paging": paging,
         "mock": True,
     })
+
+
+def _mock_paging(message: str) -> Optional[dict[str, Any]]:
+    """Deterministic walkthrough metadata so the UI can be checked offline."""
+    slash = parse_slash_command(message)
+    if not slash:
+        return None
+    command, remainder = slash
+    if command == "tisw" and remainder:
+        return PagingInfo(part=1, parts_total=TISW_PARTS, title=TISW_BEATS[0], topic=remainder).model_dump()
+    if command in {"continue", "next"}:
+        return PagingInfo(part=2, parts_total=TISW_PARTS, title=TISW_BEATS[1], topic="mock topic").model_dump()
+    if command == "all":
+        return PagingInfo(
+            part=TISW_PARTS, parts_total=TISW_PARTS, title=TISW_BEATS[-1],
+            topic="mock topic", complete=True,
+        ).model_dump()
+    return None
 
 
 async def _stream_chat_events_locked(
@@ -1103,6 +1155,7 @@ async def _stream_chat_events_locked(
     emitted_text = False
     accumulated: list[str] = []
     final_response = ""
+    final_state: Optional[dict[str, Any]] = None
     try:
         execution = _prepare_chat_execution(
             payload,
@@ -1142,12 +1195,13 @@ async def _stream_chat_events_locked(
             final_response = execution["early_response"].response
             early_response = execution["early_response"]
             early_response.turn_id = turn_id
-            _mark_turn(record, TURN_COMPLETED, early_response.model_dump())
+            early_payload = _response_payload(early_response)
+            _mark_turn(record, TURN_COMPLETED, early_payload)
             _persist_completed_turn(client_id, thread_id, turn_id, payload.message.strip(), early_response)
             if final_response:
                 emitted_text = True
                 yield _sse_event("delta", {"text": final_response})
-            yield _sse_event("done", early_response.model_dump())
+            yield _sse_event("done", early_payload)
             return
 
         trace_context = _request_tracing_context(
@@ -1182,7 +1236,10 @@ async def _stream_chat_events_locked(
                     event.get("event") == "on_chain_end"
                     and event.get("name") in {"LangGraph", execution["config"].get("run_name")}
                 ):
-                    final_response = _final_response_from_output((event.get("data") or {}).get("output"))
+                    output = (event.get("data") or {}).get("output")
+                    final_response = _final_response_from_output(output)
+                    if isinstance(output, dict):
+                        final_state = output
 
         if not final_response:
             final_response = "".join(accumulated)
@@ -1191,6 +1248,7 @@ async def _stream_chat_events_locked(
         if not final_response:
             raise RuntimeError("Empty response from LangGraph.")
 
+        paging_data = paging_payload(final_state) if final_state else None
         response = ChatResponse(
             response=final_response,
             thread_id=execution["thread_id"],
@@ -1198,6 +1256,7 @@ async def _stream_chat_events_locked(
             mode=execution["mode"],
             rag_used=execution["rag_used"],
             sources=execution["sources"],
+            paging=PagingInfo(**paging_data) if paging_data else None,
         )
         _stream_diagnostic(
             "completed",
@@ -1207,11 +1266,12 @@ async def _stream_chat_events_locked(
             response=final_response,
             source="live_generation",
         )
-        _mark_turn(record, TURN_COMPLETED, response.model_dump())
+        response_payload = _response_payload(response)
+        _mark_turn(record, TURN_COMPLETED, response_payload)
         _persist_completed_turn(client_id, thread_id, turn_id, payload.message.strip(), response)
         if execution["sources"]:
             yield _sse_event("sources", {"sources": [source.model_dump() for source in execution["sources"]]})
-        yield _sse_event("done", response.model_dump())
+        yield _sse_event("done", response_payload)
     except (asyncio.CancelledError, GeneratorExit):
         _restore_checkpoint(execution)
         _mark_turn(record, TURN_CANCELLED)
@@ -1377,6 +1437,7 @@ async def chat_endpoint(
                 msgs = result.get("messages", [])
                 if not msgs:
                     raise HTTPException(status_code=500, detail="Empty response from LangGraph.")
+                paging_data = paging_payload(result)
                 response = ChatResponse(
                     response=str(msgs[-1].content),
                     thread_id=execution["thread_id"],
@@ -1384,9 +1445,10 @@ async def chat_endpoint(
                     mode=result.get("active_mode", execution["mode"]),
                     rag_used=execution["rag_used"],
                     sources=execution["sources"],
+                    paging=PagingInfo(**paging_data) if paging_data else None,
                 )
             response.turn_id = turn_id
-            _mark_turn(record, TURN_COMPLETED, response.model_dump())
+            _mark_turn(record, TURN_COMPLETED, _response_payload(response))
             _persist_completed_turn(client_id, thread_id, turn_id, payload.message.strip(), response)
             return response
         except HTTPException:

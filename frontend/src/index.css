@@ -1146,6 +1146,74 @@ code, pre, .md-code-block, .md-inline-code {
   background: rgba(255, 255, 255, 0.1);
 }
 
+/* Paged TISW walkthrough: part label and the two advancement chips */
+.walkthrough-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.walkthrough-part {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #d8b4fe;
+}
+
+.walkthrough-title {
+  font-size: 11.5px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.walkthrough-status--complete .walkthrough-part {
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.walkthrough-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.walkthrough-btn {
+  padding: 6px 13px;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.walkthrough-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+.walkthrough-btn--primary {
+  background: rgba(147, 51, 234, 0.22);
+  border-color: rgba(168, 85, 247, 0.4);
+  color: #f3e8ff;
+}
+
+.walkthrough-btn--primary:hover {
+  background: rgba(147, 51, 234, 0.32);
+  border-color: rgba(168, 85, 247, 0.6);
+}
+
+.walkthrough-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .assistant-header {
   display: flex;
   align-items: center;
@@ -1220,6 +1288,59 @@ code, pre, .md-code-block, .md-inline-code {
   width: 100%;
   max-width: 760px;
   margin-bottom: 10px;
+}
+
+.input-mode-row {
+  pointer-events: auto;
+  width: 100%;
+  max-width: 760px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 6px 8px;
+}
+
+.input-mode-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  border: 1px solid rgba(168, 85, 247, 0.32);
+  background: rgba(147, 51, 234, 0.16);
+  color: #e9d5ff;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.input-mode-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #c084fc;
+  box-shadow: 0 0 8px rgba(192, 132, 252, 0.9);
+}
+
+.input-mode-exit {
+  padding: 3px 9px;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.input-mode-exit:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.input-mode-exit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .input-card {

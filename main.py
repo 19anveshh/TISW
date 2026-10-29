@@ -100,8 +100,47 @@ TEACHING_METHODOLOGY_PROMPT = TISW_MODE_PROMPT
 
 
 # =====================================================================
-# 2. INTELLIGENT MODE DETECTION
+# 2. PAGED DELIVERY, SLASH COMMANDS & MODE DETECTION
 # =====================================================================
+
+# A paged TISW answer is delivered one quarter at a time. The four beats are
+# fixed so the walkthrough never needs an extra planning model call.
+TISW_BEATS = (
+    "Intuition and the problem",
+    "The real concept and how it works",
+    "A worked example",
+    "Depth, limits, and practice",
+)
+TISW_PARTS = len(TISW_BEATS)
+
+SLASH_COMMANDS = frozenset({"tisw", "normal", "continue", "next", "all"})
+
+_CONTINUE_TEXTS = frozenset({"continue", "next", "next part", "go on", "keep going"})
+_ALL_TEXTS = frozenset({
+    "give me all",
+    "give me everything",
+    "all at once",
+    "show everything",
+    "all parts",
+    "the whole thing",
+})
+
+
+def parse_slash_command(user_text: str) -> Optional[tuple[str, str]]:
+    """Split a leading supported slash command into (command, remainder).
+
+    Unknown slash text and ordinary questions return None so a missed command
+    is answered as a normal message instead of being swallowed.
+    """
+    text = (user_text or "").strip()
+    if not text.startswith("/"):
+        return None
+    head, _, rest = text[1:].partition(" ")
+    command = head.lower()
+    if command not in SLASH_COMMANDS:
+        return None
+    return command, rest.strip()
+
 
 def detect_mode_command(user_text: str) -> Optional[str]:
     """Recognize explicit TISW activation/deactivation requests only.
@@ -110,6 +149,15 @@ def detect_mode_command(user_text: str) -> Optional[str]:
     acronym. This keeps incidental questions such as "What does TISW stand for?"
     and comparisons with normal chat in the default mode.
     """
+    slash = parse_slash_command(user_text)
+    if slash:
+        command, remainder = slash
+        if command == "normal":
+            return "deactivate"
+        if command == "tisw" and not remainder:
+            return "activate"
+        return None
+
     normalized = re.sub(r"[^a-z0-9\s]", " ", (user_text or "").lower())
     normalized = re.sub(r"\s+", " ", normalized).strip()
     if not normalized:
@@ -152,6 +200,13 @@ def detect_mode_command(user_text: str) -> Optional[str]:
 
 def detect_mode_request(user_text: str, current_mode: str = "normal") -> str:
     """Apply an explicit mode command, otherwise preserve thread state."""
+    slash = parse_slash_command(user_text)
+    if slash:
+        command = slash[0]
+        if command == "tisw":
+            return "tisw"
+        if command == "normal":
+            return "normal"
     command = detect_mode_command(user_text)
     if command == "activate":
         return "tisw"
@@ -179,6 +234,23 @@ def detect_persistent_preference(user_text: str) -> Optional[str]:
     if any(marker in lowered for marker in persistence_markers):
         return user_text.strip()
     return None
+
+
+def is_paging_control(user_text: str, current_mode: str = "normal", part: int = 0) -> bool:
+    """True when a message only steers an existing walkthrough (no new question)."""
+    if detect_mode_command(user_text):
+        return True
+    slash = parse_slash_command(user_text)
+    if slash:
+        command, remainder = slash
+        if command in {"continue", "next", "all"}:
+            return True
+        if command in {"tisw", "normal"}:
+            return not remainder
+    if current_mode == "tisw" and part > 0:
+        normalized = _normalized_for_command(user_text)
+        return normalized in _CONTINUE_TEXTS or normalized in _ALL_TEXTS
+    return False
 
 
 RAG_GROUNDING_PROMPT = """
@@ -232,6 +304,85 @@ class TutorState(TypedDict, total=False):
     session_preferences: List[str]
     active_mode: str  # 'normal' | 'tisw'
     rag_context: Optional[str]
+    tisw_part: int    # parts of the current walkthrough already delivered
+    tisw_topic: str   # question the current walkthrough is teaching
+    tisw_paged: bool  # whether the latest answer belongs to the walkthrough
+
+
+def paging_payload(state: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Describe the active walkthrough for API clients, or None if there is none."""
+    if (state.get("active_mode") or "normal") != "tisw":
+        return None
+    part = int(state.get("tisw_part") or 0)
+    topic = state.get("tisw_topic") or ""
+    if part <= 0 or not topic or not state.get("tisw_paged", True):
+        return None
+    delivered = min(part, TISW_PARTS)
+    return {
+        "part": delivered,
+        "parts_total": TISW_PARTS,
+        "title": TISW_BEATS[delivered - 1],
+        "topic": topic,
+        "complete": delivered >= TISW_PARTS,
+    }
+
+
+def _normalized_for_command(user_text: str) -> str:
+    normalized = re.sub(r"[^a-z0-9\s]", " ", (user_text or "").lower())
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _paging_block(action: str, part: int, topic: str) -> str:
+    """System-prompt block that turns one TISW answer into one walkthrough part."""
+    if action == "all":
+        return (
+            "\n\n# PAGED WALKTHROUGH — COMPLETE ANSWER REQUESTED\n"
+            f"Topic: {topic}\n"
+            "The student asked for the whole walkthrough at once. Give the complete TISW answer now, "
+            "covering these four beats in order: intuition and the problem, the real concept and how it "
+            "works, a worked example, and depth with limits and practice. Do not number parts and do not "
+            "offer to continue later."
+        )
+
+    if action == "doubt":
+        return (
+            "\n\n# PAGED WALKTHROUGH IN PROGRESS — ANSWER THIS DOUBT\n"
+            f"Topic: {topic}\n"
+            f"Parts 1-{part} of {TISW_PARTS} were already delivered in this conversation. The student is "
+            "now asking a follow-up doubt, not asking to continue. Answer this doubt completely and "
+            "directly in TISW style. Do not restart or advance the walkthrough, do not repeat earlier "
+            "parts, and do not hand out part numbers."
+        )
+
+    if action == "answer":
+        return (
+            "\n\n# WALKTHROUGH COMPLETE — ANSWER FREELY\n"
+            f"The four-part walkthrough of {topic} is complete. Answer the student's latest message "
+            "completely in TISW style without part numbers and without offering another part. If they "
+            "name a new topic, teach it fully; paged delivery restarts only when they ask for it."
+        )
+
+    title = TISW_BEATS[part - 1]
+    if part < TISW_PARTS:
+        closing = (
+            f"End with one short sentence offering part {part + 1} when the student is ready. "
+            "Do not ask more than one question."
+        )
+    else:
+        closing = (
+            "This is the final part. End with one short sentence saying the walkthrough is complete "
+            "and inviting a new topic."
+        )
+    return (
+        f"\n\n# PAGED WALKTHROUGH — DELIVER PART {part} OF {TISW_PARTS} ONLY\n"
+        f"Topic: {topic}\n"
+        f"This part: {title}.\n"
+        "The full teaching for this topic is split into four roughly equal parts. Deliver only this "
+        "quarter now: do not preview later parts beyond a single short signpost, do not repeat material "
+        "already delivered, and keep it to roughly 250-350 words (code, tables, and short lists are "
+        "excepted). Build on what earlier parts taught when there are any. "
+        f"{closing}"
+    )
 
 
 def _prepare_tutor_turn(state: TutorState) -> dict[str, Any]:
@@ -240,10 +391,15 @@ def _prepare_tutor_turn(state: TutorState) -> dict[str, Any]:
     current_prefs: List[str] = list(state.get("session_preferences") or [])
     current_mode: str = state.get("active_mode") or "normal"
     rag_context: Optional[str] = state.get("rag_context")
+    tisw_part: int = int(state.get("tisw_part") or 0)
+    tisw_topic: str = state.get("tisw_topic") or ""
     mode_command: Optional[str] = None
+    fixed_response: Optional[str] = None
+    paging_action: Optional[str] = None
 
+    latest_text = ""
     if messages and isinstance(messages[-1], HumanMessage):
-        latest_text = str(messages[-1].content)
+        latest_text = str(messages[-1].content).strip()
         mode_command = detect_mode_command(latest_text)
         if not mode_command:
             new_pref = detect_persistent_preference(latest_text)
@@ -251,22 +407,82 @@ def _prepare_tutor_turn(state: TutorState) -> dict[str, Any]:
                 current_prefs.append(new_pref)
         current_mode = detect_mode_request(latest_text, current_mode)
 
+    slash = parse_slash_command(latest_text)
+    command, remainder = slash if slash else ("", "")
+    normalized = _normalized_for_command(latest_text)
+
     if mode_command:
-        return {
-            "session_preferences": current_prefs,
-            "active_mode": current_mode,
-            "rag_context": rag_context,
-            "mode_command": mode_command,
-            "model_input": None,
-        }
+        if mode_command == "deactivate":
+            tisw_part, tisw_topic, paging_action = 0, "", None
+        fixed_response = "Understood."
+
+    if not fixed_response and command == "tisw" and remainder:
+        tisw_topic, tisw_part = remainder[:240], 1
+    elif not fixed_response and command in {"continue", "next"}:
+        if current_mode != "tisw" or tisw_part <= 0:
+            fixed_response = (
+                "There is no paged walkthrough in progress. Ask a question, or start one "
+                "with /tisw <topic>."
+            )
+        elif tisw_part >= TISW_PARTS:
+            fixed_response = (
+                f'The walkthrough of "{tisw_topic}" is already complete. Ask a new question, '
+                "or start another paged walkthrough with /tisw <topic>."
+            )
+        else:
+            tisw_part += 1
+    elif not fixed_response and command == "all":
+        if current_mode != "tisw" or tisw_part <= 0:
+            fixed_response = (
+                "There is no paged walkthrough in progress. Ask a question, or start one "
+                "with /tisw <topic>."
+            )
+        else:
+            tisw_part = TISW_PARTS
+    elif not fixed_response and current_mode == "tisw" and tisw_part > 0:
+        if normalized in _CONTINUE_TEXTS:
+            if tisw_part < TISW_PARTS:
+                tisw_part += 1
+        elif normalized in _ALL_TEXTS:
+            tisw_part = TISW_PARTS
+
+    # Classify what this answer is relative to the paged walkthrough.
+    if not mode_command and not fixed_response and current_mode == "tisw":
+        started = command == "tisw" and bool(remainder)
+        if started:
+            paging_action = "part"
+        elif command in {"continue", "next"} or (tisw_part > 1 and normalized in _CONTINUE_TEXTS):
+            paging_action = "part"
+        elif command == "all" or normalized in _ALL_TEXTS:
+            paging_action = "all"
+        elif tisw_part <= 0:
+            tisw_topic, tisw_part = latest_text[:240], 1
+            paging_action = "part"
+        elif tisw_part < TISW_PARTS:
+            paging_action = "doubt"
+        else:
+            paging_action = "answer"
+
+    tisw_paged = paging_action in {"part", "all", "doubt"}
+    paging_block = ""
+    if paging_action:
+        paging_block = _paging_block(paging_action, tisw_part, tisw_topic)
 
     system_msg = build_system_message(current_mode, current_prefs, rag_context)
+    if paging_block:
+        system_msg = SystemMessage(content=system_msg.content + paging_block)
+
     return {
         "session_preferences": current_prefs,
         "active_mode": current_mode,
         "rag_context": rag_context,
-        "mode_command": None,
-        "model_input": [system_msg] + messages,
+        "tisw_part": tisw_part,
+        "tisw_topic": tisw_topic,
+        "tisw_paged": tisw_paged,
+        "mode_command": mode_command,
+        "fixed_response": fixed_response,
+        "paging_action": paging_action,
+        "model_input": None if fixed_response else [system_msg] + messages,
     }
 
 
@@ -275,6 +491,9 @@ def _tutor_state_update(prepared: dict[str, Any], response: Optional[BaseMessage
         "session_preferences": prepared["session_preferences"],
         "active_mode": prepared["active_mode"],
         "rag_context": prepared["rag_context"],
+        "tisw_part": prepared["tisw_part"],
+        "tisw_topic": prepared["tisw_topic"],
+        "tisw_paged": prepared["tisw_paged"],
     }
     if response is not None:
         update["messages"] = [response]
@@ -308,8 +527,8 @@ def create_tutor_graph(llm: ChatGroq, checkpointer: InMemorySaver):
 
     def tutor_node(state: TutorState) -> dict:
         prepared = _prepare_tutor_turn(state)
-        if prepared["mode_command"]:
-            return _tutor_state_update(prepared, AIMessage(content="Understood."))
+        if prepared["fixed_response"]:
+            return _tutor_state_update(prepared, AIMessage(content=prepared["fixed_response"]))
         return _tutor_state_update(prepared, llm.invoke(prepared["model_input"]))
 
     workflow = StateGraph(TutorState)
@@ -330,8 +549,8 @@ def create_tutor_streaming_graph(llm: ChatGroq, checkpointer: InMemorySaver):
 
     async def tutor_node(state: TutorState, config: Optional[RunnableConfig] = None) -> dict:
         prepared = _prepare_tutor_turn(state)
-        if prepared["mode_command"]:
-            return _tutor_state_update(prepared, AIMessage(content="Understood."))
+        if prepared["fixed_response"]:
+            return _tutor_state_update(prepared, AIMessage(content=prepared["fixed_response"]))
 
         parts: list[str] = []
         async for chunk in llm.astream(prepared["model_input"], config=config):
@@ -422,9 +641,14 @@ def print_welcome_banner(thread_id: str) -> None:
     print("Modes:")
     print("  - NORMAL MODE (Default): Direct, natural answers in simple English.")
     print("  - TISW MODE: Activated when you ask (e.g., 'explain using TISW').")
+    print("    Answers arrive in four parts; say 'continue' for the next quarter.")
     print("    Returns to Normal Mode when you say 'now answer normally'.")
     print("-" * 68)
     print("Commands:")
+    print("  - /tisw <question>  start a paged TISW walkthrough")
+    print("  - /continue         next quarter of the walkthrough")
+    print("  - /all              the whole walkthrough in one answer")
+    print("  - /normal           leave TISW mode")
     print("  - Type 'new' to start a fresh conversation thread.")
     print("  - Type 'exit' or 'quit' to close the tutor.")
     print(f"  - Active Thread ID: {thread_id}")
@@ -468,10 +692,17 @@ def run_chat_loop() -> None:
 
             messages = result.get("messages", [])
             active_mode = result.get("active_mode", "normal")
+            part = int(result.get("tisw_part") or 0)
+            paged = paging_payload(result)
             if messages:
                 tutor_reply = messages[-1].content
-                mode_tag = f"[{active_mode.upper()} MODE]"
+                if paged and paged["part"] < paged["parts_total"]:
+                    mode_tag = f"[TISW PART {paged['part']}/{paged['parts_total']}]"
+                else:
+                    mode_tag = f"[{active_mode.upper()} MODE]"
                 print(f"\nTutor {mode_tag}:\n{tutor_reply}")
+                if paged and paged["part"] < paged["parts_total"]:
+                    print(f"\n[Say 'continue' or /continue for part {paged['part'] + 1}.]")
             else:
                 print("\n[Warning] Received an empty response from the tutor.")
 

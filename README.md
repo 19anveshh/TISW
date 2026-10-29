@@ -106,9 +106,12 @@ The stream protocol uses JSON data frames:
 event: start   data: {request_id, thread_id, mode, tracing_enabled}
 event: delta   data: {text}
 event: sources data: {sources: [...]}
-event: done    data: {response, thread_id, mode, rag_used, sources}
+event: done    data: {response, thread_id, mode, rag_used, sources, paging?}
 event: error   data: {message, status?}
 ```
+
+`paging` appears only while a TISW walkthrough is in play:
+`{part, parts_total, title, topic, complete}`.
 
 Only `on_chat_model_stream` events from the `tutor` node are forwarded. Final
 graph state is used for completion, so final state updates cannot duplicate
@@ -174,6 +177,35 @@ To deactivate it, say `Stop using TISW`, `Switch back to normal chat`,
 thread starts in normal mode, and separate server-issued sessions keep their
 mode state isolated.
 
+### Slash commands and paged answers
+
+TISW answers are delivered one quarter at a time instead of dumping the whole
+walkthrough at once. The walkthrough always has four beats: intuition and the
+problem, the real concept and how it works, a worked example, and depth,
+limits, and practice. Each part is capped at roughly 250–350 words, and the
+next quarter is only generated when the student asks for it.
+
+| Command | Effect |
+| --- | --- |
+| `/tisw <topic>` | Activate TISW and deliver part 1 immediately |
+| `/tisw` | Activate TISW without answering (the next question starts part 1) |
+| `/continue` or `/next` | Generate the next quarter |
+| `/all` | Give the remaining walkthrough in one complete answer |
+| `/normal` | Leave TISW mode and clear the walkthrough |
+
+Bare `continue`, `next`, `give me all`, and `give me everything` work too while
+a part is open. Any other question asked between parts is treated as a doubt:
+it is answered fully in TISW style without advancing or restarting the
+walkthrough. After part 4, follow-up questions are answered in full; start a
+new paged walkthrough with `/tisw <topic>`. The web client shows a
+`Part k of 4` label with **Continue** and **Give me all** controls on the latest
+answer, persists that label per message, and restores it after a reload.
+
+The command state lives in `tisw_part` and `tisw_topic` in the LangGraph
+thread, so it follows reloads and re-issued sessions that replay history.
+Page-level details are also kept server-side; no extra planning model call is
+made, so paging costs no additional input tokens.
+
 ## Document RAG
 
 ### Enable and disable
@@ -221,8 +253,9 @@ Conversations and uploaded documents survive a page reload and a backend
 restart:
 
 - Completed turns are stored in SQLite (`.data/tisw.db`, override with
-  `TISW_DB_PATH`) along with their citations, so the sidebar transcript and
-  source lists are restored exactly as they were.
+  `TISW_DB_PATH`) along with their citations and walkthrough part metadata, so
+  the sidebar transcript, source lists, and `Part k of 4` labels are restored
+  exactly as they were. Existing databases gain the new column automatically.
 - Uploaded files are stored byte-for-byte and re-indexed into the hybrid
   retriever the first time a new session asks for its documents.
 - When a reloaded thread is used again, its last 12 exchanges are replayed into
@@ -259,6 +292,7 @@ uv run python test_rag_pipeline.py
 uv run python test_server_rag_api.py
 uv run python test_security.py
 uv run python test_modes.py
+uv run python test_paging.py
 uv run python test_evaluations.py
 uv run python test_streaming_tracing.py
 
@@ -320,6 +354,7 @@ TISW/
 ├── test_rag_features.py       # Offline RAG unit coverage
 ├── test_rag_pipeline.py      # End-to-end RAG pipeline checks
 ├── test_server_rag_api.py    # FastAPI RAG integration checks
+├── test_paging.py            # Four-part TISW walkthrough and slash commands
 ├── .env.example              # Safe local configuration template
 └── frontend/
     └── src/
