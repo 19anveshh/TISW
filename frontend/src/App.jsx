@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Plus, X, Send, Paperclip, RefreshCw, BookOpen, ChevronDown, ArrowUpRight, Activity, Trash2
+  Plus, X, Send, Paperclip, RefreshCw, BookOpen, ArrowUpRight, Activity, Trash2,
+  Sparkles, History, GitHub, Menu
 } from './icons';
 import EarthBackground from './EarthBackground';
 import MarkdownRenderer from './components/MarkdownRenderer';
@@ -9,12 +10,15 @@ import DocumentManager from './components/DocumentManager';
 import SourceCitations from './components/SourceCitations';
 import Toast from './components/Toast';
 import AboutSheet from './components/AboutSheet';
+import StartHereSheet from './components/StartHereSheet';
+import FaqSheet from './components/FaqSheet';
+import GroqKeySheet from './components/GroqKeySheet';
+import MobileNavSheet from './components/MobileNavSheet';
 import CinematicIntro from './components/CinematicIntro';
 import {
   streamChatMessage,
   checkHealth,
   getRuntimeStatus,
-  verifyGroqKey,
   createServerSession,
   fetchDocuments,
   fetchThreads,
@@ -26,6 +30,7 @@ import { createTurnMessages, updateAssistantMessage, messagesFromHistory } from 
 import { createStreamPacer } from './lib/streamPacer';
 
 const ACTIVE_THREAD_KEY = 'tisw.active_thread';
+const GITHUB_URL = 'https://github.com/19anveshh/TISW';
 
 function toThreadEntry(row) {
   return {
@@ -41,191 +46,6 @@ function toThreadEntry(row) {
 function modeFromMessages(rows = []) {
   const lastAssistant = [...rows].reverse().find((msg) => msg.role === 'assistant');
   return lastAssistant?.paging ? 'tisw' : 'normal';
-}
-
-// ============================================================================
-// Eye icon (show/hide password)
-// ============================================================================
-function EyeIcon({ open }) {
-  return open ? (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-      <circle cx="12" cy="12" r="3"/>
-    </svg>
-  ) : (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
-      <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
-      <line x1="1" y1="1" x2="23" y2="23"/>
-    </svg>
-  );
-}
-
-// ============================================================================
-// ============================================================================
-// GroqKeyWidget — inline sidebar section
-// Props:
-//   sessionToken  string|null   — opaque token held in App state
-//   onVerified    fn(token)     — called when key passes backend verification
-//   onClear       fn()          — called when user removes the key
-// ============================================================================
-function GroqKeyWidget({ sessionToken, onVerified, onClear }) {
-  const [expanded, setExpanded]   = useState(false);
-  const [apiKey, setApiKey]       = useState('');
-  const [showKey, setShowKey]     = useState(false);
-  const [verifying, setVerifying] = useState(false);
-  const [error, setError]         = useState('');
-  const inputRef                  = useRef(null);
-
-  const connected = Boolean(sessionToken);
-
-  const handleExpand = () => {
-    setExpanded(true);
-    setError('');
-    setTimeout(() => inputRef.current?.focus(), 60);
-  };
-
-  const handleCancel = () => {
-    setExpanded(false);
-    setApiKey('');
-    setError('');
-  };
-
-  const handleVerify = async () => {
-    const trimmed = apiKey.trim();
-    if (!trimmed) { setError('Please paste your Groq API key.'); return; }
-    setError('');
-    setVerifying(true);
-    try {
-      const data = await verifyGroqKey(trimmed);
-      // Store only the opaque token — raw key is discarded here
-      setApiKey('');
-      setExpanded(false);
-      onVerified(data.session_token);
-    } catch (err) {
-      setError(err.message || 'Verification failed.');
-    } finally {
-      setVerifying(false);
-    }
-  };
-
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter') handleVerify();
-    if (e.key === 'Escape') handleCancel();
-  };
-
-  // ── Connected state ────────────────────────────────────────────────────────
-  if (connected && !expanded) {
-    return (
-      <div className="groq-widget">
-        <div className="groq-widget-row">
-          <span className="groq-badge">G</span>
-          <span className="groq-widget-status connected">Groq connected</span>
-          <button
-            type="button"
-            className="groq-widget-action"
-            onClick={() => { onClear(); setExpanded(false); }}
-            title="Remove key"
-          >
-            Change
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // ── Collapsed (no key yet) ─────────────────────────────────────────────────
-  if (!expanded) {
-    return (
-      <div className="groq-widget">
-        <div className="groq-widget-row">
-          <span className="groq-badge">G</span>
-          <span className="groq-widget-label">Groq AI</span>
-          <button
-            type="button"
-            className="groq-widget-action"
-            onClick={handleExpand}
-            title="Add your Groq API key"
-          >
-            Add key
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // ── Expanded form ──────────────────────────────────────────────────────────
-  return (
-    <div className="groq-widget groq-widget--expanded">
-      <div className="groq-form-header">
-        <span className="groq-badge">G</span>
-        <span className="groq-form-title">Paste your Groq API key</span>
-        <button type="button" className="groq-form-cancel-x" onClick={handleCancel} aria-label="Cancel">
-          <X className="w-3.5 h-3.5" />
-        </button>
-      </div>
-
-      <div className="groq-input-wrap">
-        <input
-          ref={inputRef}
-          type={showKey ? 'text' : 'password'}
-          className={`groq-key-input ${error ? 'groq-key-input--error' : ''}`}
-          value={apiKey}
-          onChange={(e) => { setApiKey(e.target.value); setError(''); }}
-          onKeyDown={handleKeyDown}
-          placeholder="gsk_..."
-          autoComplete="off"
-          spellCheck={false}
-          disabled={verifying}
-        />
-        <button
-          type="button"
-          className="groq-eye-btn"
-          onClick={() => setShowKey((v) => !v)}
-          tabIndex={-1}
-          aria-label={showKey ? 'Hide key' : 'Show key'}
-        >
-          <EyeIcon open={showKey} />
-        </button>
-      </div>
-
-      {error && <p className="groq-error-msg">{error}</p>}
-
-      <p className="groq-hint">
-        Free API key at{' '}
-        <a
-          href="https://console.groq.com/keys"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="groq-link"
-        >
-          console.groq.com/keys
-        </a>
-        . Verified server-side, never stored in browser.
-      </p>
-
-      <div className="groq-form-actions">
-        <button type="button" className="groq-cancel-btn" onClick={handleCancel} disabled={verifying}>
-          Cancel
-        </button>
-        <button
-          type="button"
-          className="groq-verify-btn"
-          onClick={handleVerify}
-          disabled={verifying || !apiKey.trim()}
-        >
-          {verifying ? (
-            <>
-              <RefreshCw className="w-3.5 h-3.5 spin" />
-              Verifying…
-            </>
-          ) : (
-            'Verify & Save'
-          )}
-        </button>
-      </div>
-    </div>
-  );
 }
 
 // ============================================================================
@@ -262,7 +82,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen]   = useState(false);
   const [toast, setToast]               = useState(null);
   const [toastType, setToastType]       = useState('info');
-  const [aboutOpen, setAboutOpen]       = useState(false);
+  const [activeSheet, setActiveSheet]   = useState(null); // start | about | faq | groq | menu
   const [backendStatus, setBackendStatus] = useState('checking');
   const [showFileZone, setShowFileZone] = useState(false);
 
@@ -277,7 +97,6 @@ export default function App() {
   const messagesScrollRef = useRef(null);
   const anchoredUserMessageRef = useRef(null);
   const textareaRef = useRef(null);
-  const aboutButtonRef = useRef(null);
   const activeRequestRef = useRef(null);
   const pacerRef = useRef(null);
   const retryTurnRef = useRef(null);
@@ -355,6 +174,62 @@ export default function App() {
       // A missing server key is valid when the visitor uses the sidebar key flow.
     }
   }, [updateSessionToken]);
+
+  // --- Sheets (About, Start Here, FAQ, Groq Key, mobile menu) ---
+  const activeSheetRef = useRef(null);
+  const sheetTriggerRef = useRef(null);
+
+  const openSheet = useCallback((name) => {
+    // Keep the original trigger when one sheet opens another inside the overlay.
+    if (!activeSheetRef.current) {
+      sheetTriggerRef.current = document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    }
+    activeSheetRef.current = name;
+    setActiveSheet(name);
+  }, []);
+
+  const closeSheet = useCallback(() => {
+    activeSheetRef.current = null;
+    const target = sheetTriggerRef.current;
+    sheetTriggerRef.current = null;
+    setActiveSheet(null);
+    if (target && document.contains(target)) {
+      window.setTimeout(() => target.focus?.(), 40);
+    }
+  }, []);
+
+  const handleOpenDocuments = useCallback(() => {
+    activeSheetRef.current = null;
+    sheetTriggerRef.current = null;
+    setActiveSheet(null);
+    setSidebarOpen(true);
+  }, []);
+
+  const handleKeyVerified = useCallback((token) => {
+    updateSessionToken(token);
+    triggerToast("Groq API key verified — you're connected!", 'success');
+  }, [updateSessionToken, triggerToast]);
+
+  const handleKeyCleared = useCallback(() => {
+    updateSessionToken(null);
+    setDocuments([]);
+    establishServerSession();
+    triggerToast('API key removed', 'info');
+  }, [updateSessionToken, establishServerSession, triggerToast]);
+
+  const handleToggleRag = useCallback((value) => {
+    setRagEnabled(value);
+    if (value) {
+      triggerToast(
+        `Knowledge Base (RAG) enabled (${documents.length} document${documents.length === 1 ? '' : 's'})`,
+        'info'
+      );
+    } else {
+      triggerToast('Knowledge Base (RAG) disabled — answering from general tutor knowledge', 'info');
+    }
+  }, [documents.length, triggerToast]);
 
   // --- Scroll anchor ---
   // Position a new question once, then leave the scroll position alone while the
@@ -571,7 +446,7 @@ export default function App() {
 
       updateAssistant({
         content: isSessionExpired
-          ? `> ⚠️ **Session Expired**\n> Your Groq session has expired. Please re-enter your API key in the sidebar.`
+          ? `> ⚠️ **Session Expired**\n> Your Groq session has expired. Open **Groq Key** and verify your API key again.`
           : `> ⚠️ **Error**\n> ${errorMsg}`,
         isStreaming: false,
         isError: true,
@@ -690,7 +565,7 @@ export default function App() {
   const openWalkthrough = [...messages].reverse().find((msg) => msg.role === 'assistant')?.paging;
 
   const composerPlaceholder = (() => {
-    if (!sessionToken) return 'Open the sidebar to configure your Groq API key...';
+    if (!sessionToken) return 'Add your Groq API key to start chatting...';
     if (activeMode === 'tisw') {
       return openWalkthrough && !openWalkthrough.complete
         ? `/continue for part ${openWalkthrough.part + 1}, or ask a doubt…`
@@ -736,33 +611,24 @@ export default function App() {
           <span>New Chat</span>
         </button>
 
-        {/* Groq API Key Widget */}
-        <GroqKeyWidget
-          sessionToken={sessionToken}
-          onVerified={(token) => {
-            updateSessionToken(token);
-            triggerToast('Groq API key verified — you\'re connected!', 'success');
-          }}
-          onClear={() => {
-            updateSessionToken(null);
-            setDocuments([]);
-            establishServerSession();
-            triggerToast('API key removed', 'info');
-          }}
-        />
+        {/* Groq key status — opens the single key-configuration sheet */}
+        <div className="sidebar-key-card">
+          <span className="groq-badge">G</span>
+          <div className="sidebar-key-info">
+            <span className="sidebar-key-label">Groq API key</span>
+            <span className={`sidebar-key-status ${sessionToken ? 'sidebar-key-status--on' : ''}`}>
+              {sessionToken ? 'Connected for this session' : 'Not configured yet'}
+            </span>
+          </div>
+          <button type="button" className="sidebar-key-btn" onClick={() => openSheet('groq')}>
+            {sessionToken ? 'Manage' : 'Add key'}
+          </button>
+        </div>
 
         {/* Document RAG & Knowledge Base Manager */}
         <DocumentManager
           ragEnabled={ragEnabled}
-          onToggleRag={(val) => {
-            setRagEnabled(val);
-            triggerToast(
-              val
-                ? `Knowledge Base (RAG) enabled (${documents.length} document${documents.length === 1 ? '' : 's'})`
-                : 'Knowledge Base (RAG) disabled',
-              'info'
-            );
-          }}
+          onToggleRag={handleToggleRag}
           sessionToken={sessionToken}
           onToast={triggerToast}
           documents={documents}
@@ -817,40 +683,57 @@ export default function App() {
             <span className="brand-logo-text">TISW</span>
           </div>
 
-          <nav className="header-nav">
-            <button ref={aboutButtonRef} type="button" className="nav-link" onClick={() => setAboutOpen(true)}>
+          <nav className="header-nav" aria-label="Primary">
+            <button
+              type="button"
+              className="nav-cta"
+              onClick={() => openSheet('start')}
+              aria-haspopup="dialog"
+              aria-label="Start Here"
+              title="New here? Start with the three-step setup"
+            >
+              <Sparkles />
+              <span>Start Here</span>
+            </button>
+            <button
+              type="button"
+              className="nav-link"
+              onClick={() => openSheet('about')}
+              aria-haspopup="dialog"
+            >
               About
             </button>
             <button
               type="button"
-              className={`nav-link nav-link--rag ${ragEnabled ? 'nav-link--rag-active' : ''}`}
-              onClick={() => {
-                setRagEnabled((v) => !v);
-                triggerToast(
-                  !ragEnabled
-                    ? `Knowledge Base (RAG) enabled (${documents.length} document${documents.length === 1 ? '' : 's'})`
-                    : 'Knowledge Base (RAG) disabled — answering from general tutor knowledge',
-                  'info'
-                );
-              }}
-              title="Toggle Knowledge Base (RAG)"
+              className="nav-link"
+              onClick={() => openSheet('faq')}
+              aria-haspopup="dialog"
             >
-              <span className={`mode-dot ${ragEnabled ? 'mode-dot--rag' : ''}`} />
-              <span>{ragEnabled ? `RAG: ON (${documents.length})` : 'RAG: OFF'}</span>
-            </button>
-            <button type="button" className="nav-link" onClick={() => triggerToast('Active Curriculum: Computer Science, Mathematics, Engineering, Sciences', 'info')}>
-              Curriculum
-            </button>
-            <button type="button" className="nav-link" onClick={() => triggerToast('Ask naturally, or upload documents for grounded answers.', 'info')}>
               FAQ
             </button>
-            <button type="button" className="nav-link nav-link--dropdown" onClick={() => setSidebarOpen(true)}>
-              <span>{sessionToken ? 'Groq Active' : 'Groq Key'}</span>
-              <ChevronDown className="w-3.5 h-3.5" />
+            <button
+              type="button"
+              className="nav-link"
+              onClick={() => openSheet('groq')}
+              aria-haspopup="dialog"
+              title={sessionToken ? 'Groq key connected — manage your session' : 'Add your Groq API key'}
+            >
+              <span>Groq Key</span>
+              {sessionToken && <span className="mode-dot mode-dot--connected" aria-hidden="true" />}
             </button>
           </nav>
 
           <div className="header-actions">
+            <button
+              type="button"
+              className={`nav-link nav-link--rag rag-toggle-btn ${ragEnabled ? 'nav-link--rag-active' : ''}`}
+              onClick={() => handleToggleRag(!ragEnabled)}
+              title="Toggle Knowledge Base (RAG)"
+              aria-pressed={ragEnabled}
+            >
+              <span className={`mode-dot ${ragEnabled ? 'mode-dot--rag' : ''}`} />
+              <span>{ragEnabled ? `RAG: ON (${documents.length})` : 'RAG: OFF'}</span>
+            </button>
             <button
               type="button"
               className={`tracing-toggle ${tracingPreference && runtimeStatus.tracingAvailable && !runtimeStatus.offline ? 'tracing-toggle--on' : ''} ${runtimeStatus.offline || !runtimeStatus.tracingAvailable ? 'tracing-toggle--unavailable' : ''}`}
@@ -864,13 +747,23 @@ export default function App() {
             </button>
             <button
               type="button"
-              className="nav-btn-ghost"
-              onClick={() => setSidebarOpen((prev) => !prev)}
-              title="Sessions & Groq Key"
-              aria-label="Sessions"
+              className="header-icon-btn header-icon-btn--history"
+              onClick={() => setSidebarOpen(true)}
+              title="Documents and chat history"
+              aria-label="Documents and chat history"
             >
-              Sessions
+              <History />
             </button>
+            <a
+              className="header-icon-btn header-icon-btn--github"
+              href={GITHUB_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Star TISW on GitHub"
+              aria-label="Star TISW on GitHub"
+            >
+              <GitHub />
+            </a>
             <button
               type="button"
               className="nav-btn-pill"
@@ -878,7 +771,18 @@ export default function App() {
               title="Start a new chat session"
               aria-label="New Chat"
             >
+              <Plus />
               <span>New Chat</span>
+            </button>
+            <button
+              type="button"
+              className="header-icon-btn mobile-nav-toggle"
+              onClick={() => openSheet('menu')}
+              aria-haspopup="dialog"
+              aria-label="Open menu"
+              title="Menu"
+            >
+              <Menu />
             </button>
           </div>
         </header>
@@ -897,9 +801,10 @@ export default function App() {
                 <button
                   type="button"
                   className="hero-cta-btn"
-                  onClick={() => textareaRef.current?.focus()}
+                  onClick={() => openSheet('start')}
+                  aria-haspopup="dialog"
                 >
-                  <span>Start Learning & Chat</span>
+                  <span>Start Here</span>
                 </button>
               </div>
 
@@ -1112,12 +1017,44 @@ export default function App() {
       </div>
 
         <Toast message={toast} type={toastType} />
-        {aboutOpen && (
-          <AboutSheet
-            onClose={() => {
-              setAboutOpen(false);
-              aboutButtonRef.current?.focus();
+        {activeSheet === 'start' && (
+          <StartHereSheet
+            sessionToken={sessionToken}
+            documentCount={documents.length}
+            onOpenGroq={() => setActiveSheet('groq')}
+            onOpenDocuments={handleOpenDocuments}
+            onOpenFaq={() => setActiveSheet('faq')}
+            onClose={closeSheet}
+          />
+        )}
+        {activeSheet === 'about' && <AboutSheet onClose={closeSheet} />}
+        {activeSheet === 'faq' && <FaqSheet onClose={closeSheet} />}
+        {activeSheet === 'groq' && (
+          <GroqKeySheet
+            sessionToken={sessionToken}
+            onVerified={handleKeyVerified}
+            onClear={handleKeyCleared}
+            onOpenDocuments={handleOpenDocuments}
+            onClose={closeSheet}
+          />
+        )}
+        {activeSheet === 'menu' && (
+          <MobileNavSheet
+            onClose={closeSheet}
+            onOpen={(name) => setActiveSheet(name)}
+            onOpenHistory={handleOpenDocuments}
+            onNewChat={() => {
+              closeSheet();
+              handleNewSession();
             }}
+            onToggleRag={() => handleToggleRag(!ragEnabled)}
+            ragEnabled={ragEnabled}
+            documentCount={documents.length}
+            tracingPreference={tracingPreference}
+            tracingAvailable={runtimeStatus.tracingAvailable}
+            offline={runtimeStatus.offline}
+            onToggleTracing={handleTracingToggle}
+            sessionToken={sessionToken}
           />
         )}
       </div>
