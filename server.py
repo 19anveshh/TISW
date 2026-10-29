@@ -234,6 +234,56 @@ def _validate_thread_id(thread_id: str) -> str:
     return thread_id
 
 
+def _finish_document_indexing(
+    session_id: str,
+    doc_id: str,
+    client_id: Optional[str],
+    content: bytes,
+) -> None:
+    """Embeds a staged document off the request path, then persists it once it lands."""
+    doc_index = get_session_document_index(session_id)
+    try:
+        meta = doc_index.finish_document_indexing(doc_id)
+    except Exception as exc:
+        print(f"[INDEX ERROR] {type(exc).__name__}", file=sys.stderr)
+        return
+    if meta is None or not client_id:
+        return
+    try:
+        persistence.save_document(
+            client_id,
+            doc_id=meta.doc_id,
+            filename=meta.filename,
+            file_type=meta.file_type,
+            size_kb=meta.size_kb,
+            chunk_count=meta.chunk_count,
+            uploaded_at=meta.uploaded_at,
+            content=content,
+        )
+    except Exception as exc:
+        print(f"[PERSIST ERROR] {type(exc).__name__}", file=sys.stderr)
+
+
+def _index_document_async(
+    session_id: str,
+    doc_id: str,
+    client_id: Optional[str] = None,
+    content: bytes = b"",
+) -> None:
+    """
+    Starts the embedding pass in a worker thread.
+
+    A full document takes minutes on a small CPU, far past any proxy timeout, so
+    the upload response returns while the document is still 'indexing' and the
+    client polls for it.
+    """
+    threading.Thread(
+        target=_finish_document_indexing,
+        args=(session_id, doc_id, client_id, content),
+        daemon=True,
+    ).start()
+
+
 def _restore_documents_for_session(session_id: str, entry: _SessionEntry) -> None:
     """Re-index this visitor's stored documents once per issued session."""
     if not entry.client_id or entry.documents_restored:
@@ -251,9 +301,13 @@ def _restore_documents_for_session(session_id: str, entry: _SessionEntry) -> Non
         if row["doc_id"] in doc_index.documents:
             continue
         try:
-            doc_index.add_document(row["filename"], row["content"], doc_id=row["doc_id"])
+            meta = doc_index.stage_document(
+                row["filename"], row["content"], doc_id=row["doc_id"]
+            )
         except Exception as exc:
             print(f"[DOC RESTORE ERROR] {type(exc).__name__}", file=sys.stderr)
+            continue
+        _index_document_async(session_id, meta.doc_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -362,6 +416,7 @@ class DocumentItem(BaseModel):
     size_kb: float
     chunk_count: int
     uploaded_at: float
+    status: str = "ready"
 
 class DocumentListResponse(BaseModel):
     documents: List[DocumentItem]
@@ -373,6 +428,7 @@ class UploadDocumentResponse(BaseModel):
     file_type: str
     size_kb: float
     chunk_count: int
+    index_status: str = "indexing"
     message: str
 
 class ResetResponse(BaseModel):
@@ -921,10 +977,17 @@ def _prepare_chat_execution(
         session_id = _require_session_token(session_token)
         _restore_documents_for_session(session_id, _resolve_session(session_id))
         doc_index = get_session_document_index(session_id)
-        if len(doc_index.documents) == 0 and not paging_control:
+        if doc_index.ready_document_count() == 0 and not paging_control:
+            pending = len(doc_index.documents) - doc_index.ready_document_count()
+            guidance = (
+                f"{pending} document(s) are still indexing in the background. "
+                "The sidebar shows the status — try again in a moment."
+                if pending
+                else "Please upload a PDF, DOCX, or TXT document using the paperclip or document manager in the sidebar before querying your documents."
+            )
             early = ChatResponse(
-                response="⚠️ **RAG is enabled, but no documents have been uploaded yet.**\n\n"
-                         "Please upload a PDF, DOCX, or TXT document using the paperclip or document manager in the sidebar before querying your documents.",
+                response="⚠️ **RAG is enabled, but no indexed documents are available yet.**\n\n"
+                         + guidance,
                 thread_id=thread_id,
                 mode=current_mode,
                 rag_used=False,
@@ -1574,14 +1637,14 @@ def delete_thread(
 # DOCUMENT MANAGEMENT & INGESTION (SESSION ISOLATED)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.post("/api/upload", response_model=UploadDocumentResponse)
+@app.post("/api/upload", response_model=UploadDocumentResponse, status_code=202)
 async def upload_document(
     file: UploadFile = File(...),
     x_session_token: Optional[str] = Header(default=None, alias="X-Session-Token"),
 ):
     """
-    Accepts and indexes a document for the current session's hybrid RAG store.
-    Supports PDF, DOCX, and TXT files only.
+    Accepts a document for the current session's hybrid RAG store and indexes it
+    in the background. Supports PDF, DOCX, and TXT files only.
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file uploaded.")
@@ -1608,21 +1671,8 @@ async def upload_document(
                 status_code=413,
                 detail=f"File exceeds the {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB upload limit.",
             )
-        meta = doc_index.add_document(safe_filename, content)
-        if session_entry.client_id:
-            try:
-                persistence.save_document(
-                    session_entry.client_id,
-                    doc_id=meta.doc_id,
-                    filename=meta.filename,
-                    file_type=meta.file_type,
-                    size_kb=meta.size_kb,
-                    chunk_count=meta.chunk_count,
-                    uploaded_at=meta.uploaded_at,
-                    content=content,
-                )
-            except Exception as exc:
-                print(f"[PERSIST ERROR] {type(exc).__name__}", file=sys.stderr)
+        meta = doc_index.stage_document(safe_filename, content)
+        _index_document_async(session_id, meta.doc_id, session_entry.client_id, content)
         return UploadDocumentResponse(
             status="success",
             doc_id=meta.doc_id,
@@ -1630,7 +1680,11 @@ async def upload_document(
             file_type=meta.file_type,
             size_kb=meta.size_kb,
             chunk_count=meta.chunk_count,
-            message=f"Document '{meta.filename}' ({meta.size_kb} KB, {meta.chunk_count} chunks) indexed successfully.",
+            index_status=meta.status,
+            message=(
+                f"Document '{meta.filename}' ({meta.size_kb} KB, {meta.chunk_count} chunks) "
+                "is indexing in the background."
+            ),
         )
     except ValueError as val_err:
         raise HTTPException(status_code=400, detail=str(val_err))

@@ -54,7 +54,13 @@ RRF_K = _env_int("RAG_RRF_K", 60)                               # RRF smoothing 
 FINAL_TOP_K = _env_int("RAG_FINAL_TOP_K", 6)                    # Final chunks passed to the LLM
 MAX_FILE_SIZE_BYTES = _env_int("RAG_MAX_FILE_SIZE_BYTES", 15 * 1024 * 1024)  # 15 MB
 MAX_FILES_PER_SESSION = _env_int("RAG_MAX_FILES_PER_SESSION", 10)             # Max documents
+EMBED_BATCH_SIZE = _env_int("RAG_EMBED_BATCH_SIZE", 8)                        # Chunks per ONNX pass
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt"}
+
+# Ingestion lifecycle. 'indexing' documents are registered but not searchable yet.
+INDEX_STATUS_INDEXING = "indexing"
+INDEX_STATUS_READY = "ready"
+INDEX_STATUS_FAILED = "failed"
 
 
 # =====================================================================
@@ -90,6 +96,7 @@ class DocumentMetadata:
     size_kb: float
     chunk_count: int
     uploaded_at: float
+    status: str = INDEX_STATUS_READY
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -99,6 +106,7 @@ class DocumentMetadata:
             "size_kb": self.size_kb,
             "chunk_count": self.chunk_count,
             "uploaded_at": self.uploaded_at,
+            "status": self.status,
         }
 
 
@@ -396,14 +404,21 @@ class SessionDocumentIndex:
         self.chunks: List[DocumentChunk] = []             # all chunks across session docs
         self.embeddings: Optional[np.ndarray] = None      # 2D normalized float32 array
         self.bm25: Optional[BM25Okapi] = None
+        self.pending: Dict[str, List[DocumentChunk]] = {}   # doc_id -> chunks awaiting embeddings
 
-    def add_document(
+    def stage_document(
         self,
         filename: str,
         file_bytes: bytes,
         doc_id: Optional[str] = None,
     ) -> DocumentMetadata:
-        """Parses, chunks, embeds, and indexes a new document into this session."""
+        """
+        Validates, parses and chunks a document, and registers it as 'indexing'.
+
+        Embedding is deliberately not done here: it is the slow, memory-hungry
+        stage, and running it inside the upload request is what killed uploads on
+        small hosts. Callers finish the work with finish_document_indexing().
+        """
         with self.lock:
             if len(self.documents) >= MAX_FILES_PER_SESSION:
                 raise ValueError(
@@ -423,29 +438,7 @@ class SessionDocumentIndex:
             if not new_chunks:
                 raise ValueError(f"No chunks could be produced from '{filename}'.")
 
-            # Generate embeddings for new chunks using FastEmbed
-            embedder = get_embedding_model()
-            texts = [c.text for c in new_chunks]
-            new_vectors_list = list(embedder.embed(texts))
-            new_vectors = np.array(new_vectors_list, dtype=np.float32)
-
-            # L2 Normalize for cosine similarity via dot product
-            norms = np.linalg.norm(new_vectors, axis=1, keepdims=True)
-            norms = np.where(norms == 0, 1e-9, norms)
-            new_vectors = new_vectors / norms
-
-            # Update vectors
-            if self.embeddings is None or len(self.chunks) == 0:
-                self.embeddings = new_vectors
-            else:
-                self.embeddings = np.vstack([self.embeddings, new_vectors])
-
-            self.chunks.extend(new_chunks)
-
-            # Rebuild BM25 index with all chunks in session
-            corpus_tokens = [c.tokens for c in self.chunks]
-            self.bm25 = BM25Okapi(corpus_tokens)
-
+            self.pending[doc_id] = new_chunks
             meta = DocumentMetadata(
                 doc_id=doc_id,
                 filename=filename,
@@ -453,9 +446,65 @@ class SessionDocumentIndex:
                 size_kb=round(len(file_bytes) / 1024, 1),
                 chunk_count=len(new_chunks),
                 uploaded_at=time.time(),
+                status=INDEX_STATUS_INDEXING,
             )
             self.documents[doc_id] = meta
             return meta
+
+    def finish_document_indexing(self, doc_id: str) -> Optional[DocumentMetadata]:
+        """Embeds a staged document outside the lock, then merges it into the live index."""
+        with self.lock:
+            new_chunks = self.pending.get(doc_id)
+            meta = self.documents.get(doc_id)
+
+        if not new_chunks or meta is None:
+            return None
+
+        try:
+            embedder = get_embedding_model()
+            texts = [c.text for c in new_chunks]
+            # Small batches keep the ONNX arena flat: the default batch of 256
+            # peaks near 1.2 GB on a full-size document, which free-tier hosts
+            # OOM-kill mid-request and the browser reads that as 'Failed to fetch'.
+            new_vectors = np.array(
+                list(embedder.embed(texts, batch_size=EMBED_BATCH_SIZE)), dtype=np.float32
+            )
+            # L2 Normalize for cosine similarity via dot product
+            norms = np.linalg.norm(new_vectors, axis=1, keepdims=True)
+            norms = np.where(norms == 0, 1e-9, norms)
+            new_vectors = new_vectors / norms
+        except Exception:
+            with self.lock:
+                self.pending.pop(doc_id, None)
+                if doc_id in self.documents:
+                    self.documents[doc_id].status = INDEX_STATUS_FAILED
+            raise
+
+        with self.lock:
+            self.pending.pop(doc_id, None)
+            if doc_id not in self.documents:
+                return None  # removed while it was still indexing
+
+            if self.embeddings is None or len(self.chunks) == 0:
+                self.embeddings = new_vectors
+            else:
+                self.embeddings = np.vstack([self.embeddings, new_vectors])
+
+            self.chunks.extend(new_chunks)
+            # Rebuild BM25 index with all chunks in session
+            self.bm25 = BM25Okapi([c.tokens for c in self.chunks])
+            meta.status = INDEX_STATUS_READY
+            return meta
+
+    def add_document(
+        self,
+        filename: str,
+        file_bytes: bytes,
+        doc_id: Optional[str] = None,
+    ) -> DocumentMetadata:
+        """Parses, chunks, embeds, and indexes a new document into this session."""
+        meta = self.stage_document(filename, file_bytes, doc_id=doc_id)
+        return self.finish_document_indexing(meta.doc_id) or meta
 
     def remove_document(self, doc_id: str) -> bool:
         """Removes a document and its chunks, re-syncing vector and BM25 indexes."""
@@ -464,6 +513,7 @@ class SessionDocumentIndex:
                 return False
 
             del self.documents[doc_id]
+            self.pending.pop(doc_id, None)
 
             # Find indices of chunks to retain
             keep_indices = [idx for idx, c in enumerate(self.chunks) if c.doc_id != doc_id]
@@ -485,6 +535,11 @@ class SessionDocumentIndex:
         """Returns metadata for all documents in this session."""
         with self.lock:
             return [doc.to_dict() for doc in self.documents.values()]
+
+    def ready_document_count(self) -> int:
+        """Counts documents whose chunks are actually searchable right now."""
+        with self.lock:
+            return sum(1 for doc in self.documents.values() if doc.status == INDEX_STATUS_READY)
 
     def hybrid_search(
         self,

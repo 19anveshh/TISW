@@ -23,6 +23,7 @@ export default function DocumentManager({
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef(null);
+  const statusSeenRef = useRef({});
 
   // Load documents when session changes
   const loadDocs = useCallback(async () => {
@@ -33,18 +34,42 @@ export default function DocumentManager({
     try {
       setLoading(true);
       const data = await fetchDocuments(sessionToken);
-      setDocuments(data.documents || []);
+      const next = data.documents || [];
+      const seen = statusSeenRef.current;
+      next.forEach((doc) => {
+        const before = seen[doc.doc_id];
+        if (before === 'indexing' && doc.status === 'ready') {
+          onToast?.(`"${doc.filename}" is ready — ${doc.chunk_count} chunks indexed`, 'success');
+        } else if (before === 'indexing' && doc.status === 'failed') {
+          onToast?.(`"${doc.filename}" could not be indexed. Remove it and upload again.`, 'error');
+        }
+        seen[doc.doc_id] = doc.status;
+      });
+      const liveIds = new Set(next.map((doc) => doc.doc_id));
+      Object.keys(seen).forEach((id) => {
+        if (!liveIds.has(id)) delete seen[id];
+      });
+      setDocuments(next);
     } catch (err) {
       // Don't show loud error on initial load if backend is booting
       console.warn('Could not load session documents:', err);
     } finally {
       setLoading(false);
     }
-  }, [sessionToken, setDocuments]);
+  }, [sessionToken, setDocuments, onToast]);
 
   useEffect(() => {
     loadDocs();
   }, [loadDocs]);
+
+  // Indexing runs in a server-side worker, so keep refreshing while any document
+  // is still reported as 'indexing'. Each refresh re-arms the timer until none remain.
+  useEffect(() => {
+    if (!sessionToken) return undefined;
+    if (!documents.some((doc) => doc.status === 'indexing')) return undefined;
+    const timer = setInterval(loadDocs, 3000);
+    return () => clearInterval(timer);
+  }, [sessionToken, documents, loadDocs]);
 
   // Handle single file upload
   const handleUpload = async (file) => {
@@ -71,7 +96,11 @@ export default function DocumentManager({
     setUploading(true);
     try {
       const res = await uploadFile(file, sessionToken);
-      onToast?.(`Uploaded ${file.name} (${res.chunk_count} chunks indexed)`, 'success');
+      onToast?.(
+        `Added ${file.name} — indexing ${res.chunk_count} ${res.chunk_count === 1 ? 'chunk' : 'chunks'} in the background`,
+        'info',
+      );
+      statusSeenRef.current[res.doc_id] = res.index_status || 'indexing';
       // Automatically enable RAG if not already on
       if (!ragEnabled) {
         onToggleRag(true);
@@ -208,6 +237,14 @@ export default function DocumentManager({
                     </span>
                     <span className="doc-item-meta">
                       {doc.size_kb} KB · {doc.chunk_count} chunks
+                      {doc.status === 'indexing' && (
+                        <span className="doc-status doc-status--indexing">
+                          <RefreshCw className="w-2.5 h-2.5 spin" /> Indexing
+                        </span>
+                      )}
+                      {doc.status === 'failed' && (
+                        <span className="doc-status doc-status--failed">Not indexed</span>
+                      )}
                     </span>
                   </div>
                 </div>

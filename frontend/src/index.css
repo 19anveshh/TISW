@@ -2189,6 +2189,26 @@ code, pre, .md-code-block, .md-inline-code {
   color: rgba(255, 255, 255, 0.4);
 }
 
+.doc-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  border: 1px solid rgba(34, 211, 238, 0.28);
+  background: rgba(34, 211, 238, 0.1);
+  color: rgba(165, 243, 252, 0.85);
+  font-size: 9.5px;
+  vertical-align: 1px;
+}
+
+.doc-status--failed {
+  border-color: rgba(244, 114, 182, 0.32);
+  background: rgba(244, 114, 182, 0.12);
+  color: rgba(251, 207, 232, 0.9);
+}
+
 .doc-delete-btn {
   background: transparent;
   border: none;

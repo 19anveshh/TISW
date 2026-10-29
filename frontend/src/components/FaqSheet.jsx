@@ -75,6 +75,11 @@ const FAQ_ITEMS = [
           PDFs keep one-indexed page numbers when the parser provides them; DOCX and TXT are
           treated as having no page number, so none is invented.
         </p>
+        <p>
+          The upload returns as soon as the file is accepted, then the document is chunked and
+          embedded in the background. The sidebar marks it <strong>Indexing</strong> until it
+          turns searchable, so a large PDF never has to wait inside one request.
+        </p>
       </>
     ),
   },
@@ -88,9 +93,9 @@ const FAQ_ITEMS = [
           off to answer from general tutor knowledge instead.
         </p>
         <p>
-          If RAG is on but the session has no documents, TISW asks you to upload one rather than
-          pretending retrieval happened. Walkthrough continuation parts keep using the
-          walkthrough&apos;s own topic and citations.
+          If RAG is on but nothing is indexed yet, TISW tells you to upload a document — or waits
+          for the ones still indexing — rather than pretending retrieval happened. Walkthrough
+          continuation parts keep using the walkthrough&apos;s own topic and citations.
         </p>
       </>
     ),

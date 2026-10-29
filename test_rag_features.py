@@ -23,7 +23,7 @@ from rag_engine import (
 class FakeEmbedding:
     """Small deterministic embedding substitute; no model download or API call."""
 
-    def embed(self, texts):
+    def embed(self, texts, batch_size=None):
         vectors = []
         for text in texts:
             lowered = text.lower()

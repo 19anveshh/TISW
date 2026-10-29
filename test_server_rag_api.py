@@ -20,6 +20,7 @@ if sys.platform == "win32":
 
 import io
 import os
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 from fastapi.testclient import TestClient
@@ -95,12 +96,24 @@ def run_api_tests(_offline_guard):
         files={"file": ("operating_systems.txt", txt_content, "text/plain")},
         headers={"X-Session-Token": token_a},
     )
-    assert res_upload.status_code == 200, res_upload.text
+    assert res_upload.status_code == 202, res_upload.text
     data = res_upload.json()
     assert data["status"] == "success"
     doc_id_a = data["doc_id"]
     assert data["chunk_count"] > 0
-    print(f"✓ Uploaded TXT doc '{data['filename']}' ({data['chunk_count']} chunks, doc_id={doc_id_a})")
+    assert data["index_status"] == "indexing"
+    print(f"✓ Uploaded TXT doc '{data['filename']}' ({data['chunk_count']} chunks, doc_id={doc_id_a}) queued for indexing")
+
+    # Indexing runs in a worker thread; wait for the document to become searchable.
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        listed = client.get("/api/documents", headers={"X-Session-Token": token_a}).json()["documents"]
+        if any(d["doc_id"] == doc_id_a and d["status"] == "ready" for d in listed):
+            break
+        time.sleep(0.2)
+    else:
+        raise AssertionError(f"Document {doc_id_a} never reached 'ready' status")
+    print("✓ Background indexing completed")
 
     print("\n=== 5. Testing Document Listing ===")
     res_list = client.get(
@@ -133,7 +146,7 @@ def run_api_tests(_offline_guard):
     assert res_chat_empty.status_code == 200
     reply_empty = res_chat_empty.json()
     assert reply_empty["rag_used"] is False
-    assert "no documents have been uploaded yet" in reply_empty["response"].lower()
+    assert "no indexed documents are available yet" in reply_empty["response"].lower()
     print("✓ RAG ON with 0 documents instructs user to upload a document")
 
     print("\n=== 8. Testing Hybrid Retrieval in Session A ===")

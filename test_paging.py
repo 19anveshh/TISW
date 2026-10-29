@@ -274,6 +274,9 @@ def run_rag_continuation_test():
         def __init__(self):
             self.queries = []
 
+        def ready_document_count(self):
+            return len(self.documents)
+
         def hybrid_search(self, query, final_top_k):
             self.queries.append(query)
             return [Chunk()]
