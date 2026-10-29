@@ -33,10 +33,10 @@
 
 .about-sheet {
   position: relative;
-  width: min(720px, 100%);
-  max-height: min(86vh, 640px);
-  padding: 54px 62px 58px;
-  border-radius: 30px;
+  width: min(660px, 100%);
+  max-height: min(84vh, 560px);
+  padding: 36px 40px 38px;
+  border-radius: 24px;
   border: 1px solid rgba(255, 255, 255, 0.22);
   background:
     linear-gradient(160deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.035) 55%, rgba(255, 255, 255, 0.06) 100%),
@@ -96,11 +96,11 @@
 
 .about-close {
   position: absolute;
-  top: 20px;
-  right: 22px;
+  top: 14px;
+  right: 16px;
   z-index: 3;
-  width: 52px;
-  height: 52px;
+  width: 40px;
+  height: 40px;
   display: grid;
   place-items: center;
   border-radius: 9999px;
@@ -119,8 +119,8 @@
 }
 
 .about-close svg {
-  width: 22px;
-  height: 22px;
+  width: 18px;
+  height: 18px;
 }
 
 .about-close:hover {
@@ -136,24 +136,24 @@
 /* --- Content ------------------------------------------------------------ */
 
 .about-title {
-  margin: 0 0 30px;
+  margin: 0 0 14px;
   max-width: 520px;
-  padding-right: 62px;
-  font-size: 44px;
-  line-height: 1.1;
-  font-weight: 700;
-  letter-spacing: -0.022em;
+  padding-right: 46px;
+  font-size: 26px;
+  line-height: 1.25;
+  font-weight: 650;
+  letter-spacing: -0.02em;
   color: #ffffff;
 }
 
 .about-body {
   display: flex;
   flex-direction: column;
-  gap: 26px;
-  max-width: 570px;
-  font-size: 18px;
-  line-height: 1.6;
-  color: rgba(255, 255, 255, 0.88);
+  gap: 16px;
+  max-width: 540px;
+  font-size: 15px;
+  line-height: 1.65;
+  color: rgba(255, 255, 255, 0.82);
 }
 
 .about-body p {
@@ -165,25 +165,25 @@
     padding: 16px;
   }
   .about-sheet {
-    padding: 34px 26px 36px;
-    border-radius: 24px;
+    padding: 26px 20px 28px;
+    border-radius: 20px;
     max-height: 88vh;
   }
   .about-close {
-    top: 14px;
-    right: 14px;
-    width: 42px;
-    height: 42px;
+    top: 12px;
+    right: 12px;
+    width: 36px;
+    height: 36px;
   }
   .about-title {
-    margin-bottom: 18px;
-    padding-right: 52px;
-    font-size: clamp(26px, 7.2vw, 32px);
+    margin-bottom: 12px;
+    padding-right: 44px;
+    font-size: clamp(20px, 5.6vw, 24px);
   }
   .about-body {
-    gap: 18px;
-    font-size: 16px;
-    line-height: 1.55;
+    gap: 13px;
+    font-size: 14px;
+    line-height: 1.6;
   }
 }
 
