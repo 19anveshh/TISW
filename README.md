@@ -349,7 +349,7 @@ response evaluation; no live model score is claimed when it is unavailable.
 - There is no persistent user account system yet; tokens are bearer sessions
   with a two-hour TTL, and history is scoped per browser rather than per login.
 - The live Groq response path still requires a valid configured key and was not
-  substituted with a fake model in production.!
+  substituted with a fake model in production.
 
 ## Project structure
 
