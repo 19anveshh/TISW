@@ -17,6 +17,7 @@ import os
 import re
 import uuid
 import time
+import hashlib
 import threading
 import zipfile
 from dataclasses import dataclass, field
@@ -41,6 +42,14 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    """Read a float setting, falling back when the value is not numeric."""
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 CHUNK_SIZE_CHARS = _env_int("RAG_CHUNK_SIZE_CHARS", 1600)       # Approx 400-500 tokens
 CHUNK_OVERLAP_CHARS = min(
     _env_int("RAG_CHUNK_OVERLAP_CHARS", 250),
@@ -52,9 +61,12 @@ VECTOR_WEIGHT = 0.5                                             # RRF vector wei
 BM25_WEIGHT = 0.5                                               # RRF BM25 weight
 RRF_K = _env_int("RAG_RRF_K", 60)                               # RRF smoothing constant
 FINAL_TOP_K = _env_int("RAG_FINAL_TOP_K", 6)                    # Final chunks passed to the LLM
-MAX_FILE_SIZE_BYTES = _env_int("RAG_MAX_FILE_SIZE_BYTES", 15 * 1024 * 1024)  # 15 MB
+MAX_FILE_SIZE_BYTES = _env_int("RAG_MAX_FILE_SIZE_BYTES", 30 * 1024 * 1024)  # 30 MB
 MAX_FILES_PER_SESSION = _env_int("RAG_MAX_FILES_PER_SESSION", 10)             # Max documents
 EMBED_BATCH_SIZE = _env_int("RAG_EMBED_BATCH_SIZE", 8)                        # Chunks per ONNX pass
+# Cosine floor for vector candidates. Without it every question "grounds" on the
+# least-dissimilar chunks in the session, even when nothing is actually relevant.
+MIN_VECTOR_SCORE = _env_float("RAG_MIN_VECTOR_SCORE", 0.30)
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt"}
 
 # Ingestion lifecycle. 'indexing' documents are registered but not searchable yet.
@@ -97,6 +109,7 @@ class DocumentMetadata:
     chunk_count: int
     uploaded_at: float
     status: str = INDEX_STATUS_READY
+    content_hash: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -168,7 +181,9 @@ def validate_file_content(filename: str, file_bytes: bytes) -> None:
         raise ValueError(f"File '{filename}' is not a valid PDF.")
     if ext == ".docx" and not zipfile.is_zipfile(io.BytesIO(file_bytes)):
         raise ValueError(f"File '{filename}' is not a valid DOCX document.")
-    if ext == ".txt" and b"\x00" in file_bytes:
+    # UTF-16 text is full of NUL bytes; only a BOM distinguishes it from binary.
+    utf16_bom = file_bytes.startswith((b"\xff\xfe", b"\xfe\xff"))
+    if ext == ".txt" and b"\x00" in file_bytes and not utf16_bom:
         raise ValueError(f"File '{filename}' contains binary data and is not a valid text file.")
 
 
@@ -216,11 +231,13 @@ def extract_text_from_file(filename: str, file_bytes: bytes) -> List[Tuple[str, 
 
     elif ext == ".txt":
         decoded_text = ""
-        for encoding in ("utf-8", "utf-8-sig", "latin-1", "cp1252"):
+        # utf-8-sig first so a BOM never survives into chunk 0; utf-16 only
+        # decodes when a BOM is present, so binary files still fail above.
+        for encoding in ("utf-8-sig", "utf-16", "utf-8", "latin-1", "cp1252"):
             try:
                 decoded_text = file_bytes.decode(encoding).strip()
                 break
-            except UnicodeDecodeError:
+            except UnicodeError:
                 continue
         if not decoded_text:
             raise ValueError(f"Could not decode text file '{filename}'.")
@@ -420,15 +437,33 @@ class SessionDocumentIndex:
         small hosts. Callers finish the work with finish_document_indexing().
         """
         with self.lock:
-            if len(self.documents) >= MAX_FILES_PER_SESSION:
-                raise ValueError(
-                    f"Upload limit reached ({MAX_FILES_PER_SESSION} documents). Please remove an existing document first."
-                )
-
             if len(file_bytes) > MAX_FILE_SIZE_BYTES:
                 size_mb = round(len(file_bytes) / (1024 * 1024), 1)
                 raise ValueError(
                     f"File size ({size_mb} MB) exceeds maximum allowed size ({MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB)."
+                )
+
+            # The client retries uploads after a dropped response, so the same
+            # bytes can arrive twice. Identical content is one document, not two.
+            content_hash = hashlib.sha256(file_bytes).hexdigest()
+            duplicate = next(
+                (
+                    d for d in self.documents.values()
+                    if d.filename == filename and d.content_hash == content_hash
+                ),
+                None,
+            )
+            if duplicate is not None:
+                if duplicate.status != INDEX_STATUS_FAILED:
+                    raise ValueError(f"'{filename}' is already uploaded in this session.")
+                self.remove_document(duplicate.doc_id)
+
+            # A failed ingest is a dead row, not a live document: it must not
+            # permanently consume one of the session's upload slots.
+            active = sum(1 for d in self.documents.values() if d.status != INDEX_STATUS_FAILED)
+            if active >= MAX_FILES_PER_SESSION:
+                raise ValueError(
+                    f"Upload limit reached ({MAX_FILES_PER_SESSION} documents). Please remove an existing document first."
                 )
 
             doc_id = doc_id or str(uuid.uuid4())[:8]
@@ -447,6 +482,7 @@ class SessionDocumentIndex:
                 chunk_count=len(new_chunks),
                 uploaded_at=time.time(),
                 status=INDEX_STATUS_INDEXING,
+                content_hash=content_hash,
             )
             self.documents[doc_id] = meta
             return meta
@@ -541,6 +577,14 @@ class SessionDocumentIndex:
         with self.lock:
             return sum(1 for doc in self.documents.values() if doc.status == INDEX_STATUS_READY)
 
+    def status_counts(self) -> Dict[str, int]:
+        """Per-lifecycle counts, so 'indexing' is never confused with 'failed'."""
+        with self.lock:
+            counts = {INDEX_STATUS_INDEXING: 0, INDEX_STATUS_READY: 0, INDEX_STATUS_FAILED: 0}
+            for doc in self.documents.values():
+                counts[doc.status] = counts.get(doc.status, 0) + 1
+            return counts
+
     def hybrid_search(
         self,
         query: str,
@@ -558,51 +602,62 @@ class SessionDocumentIndex:
         3. Weighted Reciprocal Rank Fusion (RRF) with deduplication
         4. Selects final top K chunks (Default 6)
         """
+        query = (query or "").strip()
+        if not query:
+            return []
+
         with self.lock:
             if not self.chunks or self.embeddings is None or self.bm25 is None:
                 return []
+            # Consistent snapshot; the ranking below runs without the lock.
+            chunks = list(self.chunks)
+            embeddings = self.embeddings
+            bm25 = self.bm25
 
-            query = (query or "").strip()
-            if not query:
-                return []
+        total_chunks = len(chunks)
+        v_k = min(vector_candidates_k, total_chunks)
+        b_k = min(bm25_candidates_k, total_chunks)
 
-            total_chunks = len(self.chunks)
-            v_k = min(vector_candidates_k, total_chunks)
-            b_k = min(bm25_candidates_k, total_chunks)
+        # ── 1. Vector Similarity Search ────────────────────────────────────
+        # A blocking ONNX call, deliberately outside the index lock: holding it
+        # here froze uploads and deletes for the duration of every chat query.
+        embedder = get_embedding_model()
+        q_emb = list(embedder.embed([query]))[0]
+        q_vec = np.array(q_emb, dtype=np.float32)
+        q_norm = np.linalg.norm(q_vec)
+        if q_norm > 0:
+            q_vec = q_vec / q_norm
 
-            # ── 1. Vector Similarity Search ────────────────────────────────────
-            embedder = get_embedding_model()
-            q_emb = list(embedder.embed([query]))[0]
-            q_vec = np.array(q_emb, dtype=np.float32)
-            q_norm = np.linalg.norm(q_vec)
-            if q_norm > 0:
-                q_vec = q_vec / q_norm
+        sim_scores = np.dot(embeddings, q_vec)
+        v_ranked_indices = [
+            i for i in np.argsort(sim_scores)[::-1][:v_k]
+            if sim_scores[i] >= MIN_VECTOR_SCORE
+        ]
+        vector_results = [chunks[i] for i in v_ranked_indices]
 
-            sim_scores = np.dot(self.embeddings, q_vec)
-            # Argsort descending
-            v_ranked_indices = np.argsort(sim_scores)[::-1][:v_k]
-            vector_results = [self.chunks[i] for i in v_ranked_indices]
+        # ── 2. BM25 Keyword Search ─────────────────────────────────────────
+        q_tokens = tokenize_for_bm25(query)
+        bm25_results = []
+        if q_tokens:
+            bm25_scores = bm25.get_scores(q_tokens)
+            # Zero scores mean no keyword matched. Ranking them anyway injected
+            # arbitrary chunks into the fusion with half of the total weight.
+            b_ranked_indices = [
+                i for i in np.argsort(bm25_scores)[::-1][:b_k] if bm25_scores[i] > 0
+            ]
+            bm25_results = [chunks[i] for i in b_ranked_indices]
 
-            # ── 2. BM25 Keyword Search ─────────────────────────────────────────
-            q_tokens = tokenize_for_bm25(query)
-            if q_tokens:
-                bm25_scores = self.bm25.get_scores(q_tokens)
-                b_ranked_indices = np.argsort(bm25_scores)[::-1][:b_k]
-                bm25_results = [self.chunks[i] for i in b_ranked_indices]
-            else:
-                bm25_results = []
+        # ── 3. Weighted Reciprocal Rank Fusion (RRF) ───────────────────────
+        fused = weighted_rrf(
+            vector_results,
+            bm25_results,
+            semantic_weight=vector_weight,
+            keyword_weight=bm25_weight,
+            rrf_k=rrf_k,
+        )
 
-            # ── 3. Weighted Reciprocal Rank Fusion (RRF) ───────────────────────
-            fused = weighted_rrf(
-                vector_results,
-                bm25_results,
-                semantic_weight=vector_weight,
-                keyword_weight=bm25_weight,
-                rrf_k=rrf_k,
-            )
-
-            # ── 4. Select Final Top-K ─────────────────────────────────────────
-            return [chunk for chunk, _score in fused[:final_top_k]]
+        # ── 4. Select Final Top-K ─────────────────────────────────────────
+        return [chunk for chunk, _score in fused[:final_top_k]]
 
 
 def weighted_rrf(

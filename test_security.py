@@ -1,6 +1,7 @@
 """Security-focused API checks that do not require a live Groq request."""
 
 import io
+import os
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
@@ -39,7 +40,25 @@ def run_security_tests():
 
     print("✓ API keys are absent from verification responses, logs, and health output")
 
+    run_placeholder_key_tests()
     run_cors_tests()
+
+
+def run_placeholder_key_tests():
+    for placeholder in ("", "your_groq_api_key_here", "gsk_...", "changeme"):
+        with patch.dict(os.environ, {"GROQ_API_KEY": placeholder}, clear=False), \
+             patch.object(server, "is_offline_mode", return_value=False):
+            health = client.get("/api/health")
+            session = client.post("/api/session")
+
+        assert health.json()["env_key_configured"] is False, placeholder
+        assert session.status_code == 503, placeholder
+
+    with patch.dict(os.environ, {"GROQ_API_KEY": "gsk_real_test_key"}, clear=False), \
+         patch.object(server, "is_offline_mode", return_value=False):
+        assert client.get("/api/health").json()["env_key_configured"] is True
+
+    print("✓ Placeholder Groq keys are reported unconfigured and cannot create sessions")
 
 
 def run_cors_tests():

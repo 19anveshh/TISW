@@ -180,17 +180,47 @@ def list_messages(client_id: str, thread_id: str) -> List[Dict[str, Any]]:
     return messages
 
 
-def load_history_for_graph(client_id: str, thread_id: str, limit: int = 24) -> List[Dict[str, str]]:
+def load_history_for_graph(client_id: str, thread_id: str, limit: int = 24) -> List[Dict[str, Any]]:
     """Latest turns in chronological order, for seeding a fresh checkpointer."""
     if not client_id or not thread_id:
         return []
     with _lock:
         rows = _connection().execute(
-            "SELECT role, content FROM messages "
+            "SELECT role, content, paging FROM messages "
             "WHERE client_id = ? AND thread_id = ? ORDER BY id DESC LIMIT ?",
             (client_id, thread_id, limit),
         ).fetchall()
-    return [dict(row) for row in reversed(rows)]
+    history: List[Dict[str, Any]] = []
+    for row in reversed(rows):
+        item = dict(row)
+        try:
+            item["paging"] = json.loads(row["paging"]) if row["paging"] else None
+        except (TypeError, ValueError):
+            item["paging"] = None
+        history.append(item)
+    return history
+
+
+def delete_turn(client_id: str, thread_id: str, turn_id: str) -> None:
+    """Drop one turn's stored rows, e.g. when a completed turn is then aborted."""
+    if not client_id or not thread_id or not turn_id:
+        return
+    with _lock:
+        conn = _connection()
+        with conn:
+            conn.execute(
+                "DELETE FROM messages WHERE client_id = ? AND thread_id = ? AND turn_id = ?",
+                (client_id, thread_id, turn_id),
+            )
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE client_id = ? AND thread_id = ?",
+                (client_id, thread_id),
+            ).fetchone()[0]
+            if remaining == 0:
+                conn.execute(
+                    "DELETE FROM threads WHERE client_id = ? AND thread_id = ?",
+                    (client_id, thread_id),
+                )
 
 
 def delete_thread(client_id: str, thread_id: str) -> bool:
@@ -249,16 +279,16 @@ def list_document_metadata(client_id: str) -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def load_documents_for_restore(client_id: str) -> List[Dict[str, Any]]:
-    if not client_id:
-        return []
+def load_document_content(client_id: str, doc_id: str) -> Optional[bytes]:
+    """Read one stored file at a time so a restore never holds every blob."""
+    if not client_id or not doc_id:
+        return None
     with _lock:
-        rows = _connection().execute(
-            "SELECT doc_id, filename, content FROM documents "
-            "WHERE client_id = ? ORDER BY uploaded_at ASC",
-            (client_id,),
-        ).fetchall()
-    return [dict(row) for row in rows]
+        row = _connection().execute(
+            "SELECT content FROM documents WHERE client_id = ? AND doc_id = ?",
+            (client_id, doc_id),
+        ).fetchone()
+    return bytes(row["content"]) if row is not None else None
 
 
 def delete_document(client_id: str, doc_id: str) -> bool:

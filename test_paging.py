@@ -277,6 +277,9 @@ def run_rag_continuation_test():
         def ready_document_count(self):
             return len(self.documents)
 
+        def status_counts(self):
+            return {"indexing": 0, "ready": len(self.documents), "failed": 0}
+
         def hybrid_search(self, query, final_top_k):
             self.queries.append(query)
             return [Chunk()]
@@ -366,9 +369,41 @@ def run_rag_continuation_test():
     print("OK: continuations stay grounded in the walkthrough topic and survive an empty document set")
 
 
+def run_walkthrough_guard_tests():
+    llm = FakeLLM()
+    graph = create_tutor_graph(llm, InMemorySaver())
+    config = {"configurable": {"thread_id": "walkthrough-guards"}}
+    graph.update_state(config, {"active_mode": "tisw", "tisw_part": 0, "tisw_topic": ""})
+
+    for control in ("continue", "give me all"):
+        calls_before = len(llm.calls)
+        result = graph.invoke({"messages": [{"role": "user", "content": control}]}, config=config)
+        assert len(llm.calls) == calls_before
+        assert "no paged walkthrough" in str(result["messages"][-1].content)
+
+    class RecordingGraph:
+        def update_state(self, _config, values):
+            self.values = values
+
+    graph = RecordingGraph()
+    history = [
+        {"role": "user", "content": "/tisw explain recursion", "paging": None},
+        {"role": "assistant", "content": "Part two", "paging": {"part": 2, "topic": "explain recursion"}},
+    ]
+    with patch.object(server.persistence, "load_history_for_graph", return_value=history):
+        server._seed_graph_history(graph, config, "restore-client", "restore-thread")
+
+    assert graph.values["active_mode"] == "tisw"
+    assert graph.values["tisw_part"] == 2
+    assert graph.values["tisw_topic"] == "explain recursion"
+    assert graph.values["tisw_paged"] is True
+    print("OK: bare continuation guards and restored walkthrough state")
+
+
 if __name__ == "__main__":
     run_command_tests()
     run_graph_tests()
     run_stream_payload_test()
+    run_walkthrough_guard_tests()
     run_api_tests()
     run_rag_continuation_test()

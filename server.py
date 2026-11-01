@@ -105,6 +105,9 @@ from rag_engine import (
     SUPPORTED_EXTENSIONS,
     FINAL_TOP_K,
     MAX_FILE_SIZE_BYTES,
+    INDEX_STATUS_FAILED,
+    INDEX_STATUS_INDEXING,
+    INDEX_STATUS_READY,
 )
 import persistence
 
@@ -290,7 +293,7 @@ def _restore_documents_for_session(session_id: str, entry: _SessionEntry) -> Non
         return
     entry.documents_restored = True
     try:
-        stored = persistence.load_documents_for_restore(entry.client_id)
+        stored = persistence.list_document_metadata(entry.client_id)
     except Exception as exc:
         print(f"[DOC RESTORE ERROR] {type(exc).__name__}", file=sys.stderr)
         return
@@ -301,9 +304,12 @@ def _restore_documents_for_session(session_id: str, entry: _SessionEntry) -> Non
         if row["doc_id"] in doc_index.documents:
             continue
         try:
-            meta = doc_index.stage_document(
-                row["filename"], row["content"], doc_id=row["doc_id"]
-            )
+            # One blob at a time: reading every stored file up front put several
+            # hundred MB resident at once on a 30 MB-per-file limit.
+            content = persistence.load_document_content(entry.client_id, row["doc_id"])
+            if not content:
+                continue
+            meta = doc_index.stage_document(row["filename"], content, doc_id=row["doc_id"])
         except Exception as exc:
             print(f"[DOC RESTORE ERROR] {type(exc).__name__}", file=sys.stderr)
             continue
@@ -323,13 +329,35 @@ def _prewarm_rag() -> None:
         print(f"[INIT] Embedding prewarm failed: {type(exc).__name__}", file=sys.stderr)
 
 
+_SWEEP_INTERVAL_SECONDS = 900
+_sweeper_stop = threading.Event()
+
+
+def _session_sweeper() -> None:
+    """Reclaim expired sessions and their indexes without waiting for a new key.
+
+    Pruning used to happen only inside _issue_session_token, so an idle server
+    kept every expired session's embeddings resident indefinitely.
+    """
+    while not _sweeper_stop.wait(_SWEEP_INTERVAL_SECONDS):
+        try:
+            _prune_expired_sessions()
+            _prune_turn_records()
+        except Exception:
+            pass
+
+
 @asynccontextmanager
 async def _rag_lifespan(_app: FastAPI):
     # A background thread so boot stays fast and a failed download never blocks
     # chat; uploads that arrive early still work, they just pay the load once.
     if not is_offline_mode():
         threading.Thread(target=_prewarm_rag, daemon=True).start()
-    yield
+    threading.Thread(target=_session_sweeper, daemon=True).start()
+    try:
+        yield
+    finally:
+        _sweeper_stop.set()
 
 
 app = FastAPI(title="TISW AI Tutor Backend", version="3.1.0", lifespan=_rag_lifespan)
@@ -590,8 +618,27 @@ def _seed_graph_history(
             messages.append(AIMessage(content=content))
     if not messages:
         return
+    state_update: Dict[str, Any] = {"messages": messages}
+    walkthrough = next(
+        (
+            row.get("paging")
+            for row in reversed(history)
+            if row.get("role") == "assistant" and row.get("paging")
+        ),
+        None,
+    )
+    if walkthrough and walkthrough.get("topic") and int(walkthrough.get("part") or 0) > 0:
+        # The UI restores paging badges and the Continue button from SQLite, so
+        # the graph must recover the same walkthrough or /continue answers
+        # "no paged walkthrough in progress" right after a reload.
+        state_update.update({
+            "active_mode": "tisw",
+            "tisw_part": int(walkthrough.get("part") or 0),
+            "tisw_topic": str(walkthrough.get("topic") or ""),
+            "tisw_paged": True,
+        })
     try:
-        graph.update_state(config, {"messages": messages})
+        graph.update_state(config, state_update)
     except Exception as exc:
         print(f"[HISTORY SEED ERROR] {type(exc).__name__}", file=sys.stderr)
 
@@ -754,9 +801,13 @@ def _langsmith_key_configured() -> bool:
 
 
 def _langsmith_project() -> str:
-    # TISW uses one deliberate project namespace. Do not let an inherited
-    # process setting silently route application traces to another project.
-    return "tisw"
+    # TISW defaults to one deliberate project namespace; an explicit env setting
+    # wins, otherwise the documented LANGSMITH_PROJECT knob would do nothing.
+    return (
+        os.getenv("LANGSMITH_PROJECT", "").strip()
+        or os.getenv("LANGCHAIN_PROJECT", "").strip()
+        or "tisw"
+    )
 
 
 def _mock_streaming_enabled() -> bool:
@@ -977,14 +1028,25 @@ def _prepare_chat_execution(
         session_id = _require_session_token(session_token)
         _restore_documents_for_session(session_id, _resolve_session(session_id))
         doc_index = get_session_document_index(session_id)
-        if doc_index.ready_document_count() == 0 and not paging_control:
-            pending = len(doc_index.documents) - doc_index.ready_document_count()
-            guidance = (
-                f"{pending} document(s) are still indexing in the background. "
-                "The sidebar shows the status — try again in a moment."
-                if pending
-                else "Please upload a PDF, DOCX, or TXT document using the paperclip or document manager in the sidebar before querying your documents."
-            )
+        counts = doc_index.status_counts()
+        if counts.get(INDEX_STATUS_READY, 0) == 0 and not paging_control:
+            pending = counts.get(INDEX_STATUS_INDEXING, 0)
+            failed = counts.get(INDEX_STATUS_FAILED, 0)
+            if pending:
+                guidance = (
+                    f"{pending} document(s) are still indexing in the background. "
+                    "The sidebar shows the status — try again in a moment."
+                )
+            elif failed:
+                guidance = (
+                    f"{failed} document(s) could not be indexed. "
+                    "Remove them in the sidebar and upload them again."
+                )
+            else:
+                guidance = (
+                    "Please upload a PDF, DOCX, or TXT document using the paperclip "
+                    "or document manager in the sidebar before querying your documents."
+                )
             early = ChatResponse(
                 response="⚠️ **RAG is enabled, but no indexed documents are available yet.**\n\n"
                          + guidance,
@@ -1263,7 +1325,10 @@ async def _stream_chat_events_locked(
     final_response = ""
     final_state: Optional[dict[str, Any]] = None
     try:
-        execution = _prepare_chat_execution(
+        # Retrieval embeds the query and a restore re-chunks documents; both are
+        # blocking CPU work, so preparation runs off the event loop.
+        execution = await asyncio.to_thread(
+            _prepare_chat_execution,
             payload,
             session_token,
             streaming=True,
@@ -1303,7 +1368,8 @@ async def _stream_chat_events_locked(
             early_response.turn_id = turn_id
             early_payload = _response_payload(early_response)
             _mark_turn(record, TURN_COMPLETED, early_payload)
-            _persist_completed_turn(client_id, thread_id, turn_id, payload.message.strip(), early_response)
+            # Upload guidance is interface state, not teaching: persisting it
+            # replayed "no documents uploaded" back into later model context.
             if final_response:
                 emitted_text = True
                 yield _sse_event("delta", {"text": final_response})
@@ -1381,6 +1447,13 @@ async def _stream_chat_events_locked(
     except (asyncio.CancelledError, GeneratorExit):
         _restore_checkpoint(execution)
         _mark_turn(record, TURN_CANCELLED)
+        if client_id:
+            # The reply may already be persisted when the reader disconnects;
+            # otherwise a stopped answer reappears on the next reload.
+            try:
+                persistence.delete_turn(client_id, thread_id, turn_id)
+            except Exception as exc:
+                print(f"[PERSIST ERROR] {type(exc).__name__}", file=sys.stderr)
         raise
     except HTTPException as exc:
         _restore_checkpoint(execution)
@@ -1397,6 +1470,17 @@ async def _stream_chat_events_locked(
 # ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_UNCONFIGURED_GROQ_KEYS = {"your_groq_api_key_here", "gsk_...", "changeme"}
+
+
+def _configured_groq_api_key() -> Optional[str]:
+    """Return the server key only when it is neither absent nor a .env placeholder."""
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    if not api_key or api_key in _UNCONFIGURED_GROQ_KEYS:
+        return None
+    return api_key
+
+
 @app.post("/api/session", response_model=SessionResponse)
 def create_local_session(
     x_client_id: Optional[str] = Header(default=None, alias="X-Client-Id"),
@@ -1404,8 +1488,8 @@ def create_local_session(
     """Issue an isolated session for the server-configured local Groq key."""
     if is_offline_mode():
         raise HTTPException(status_code=503, detail="Groq access is disabled while TISW_OFFLINE=true.")
-    api_key = os.getenv("GROQ_API_KEY", "").strip()
-    if not api_key or api_key in {"your_groq_api_key_here", "gsk_...", "changeme"}:
+    api_key = _configured_groq_api_key()
+    if not api_key:
         raise HTTPException(
             status_code=503,
             detail="No server Groq API key is configured. Add one or verify a visitor key.",
@@ -1443,8 +1527,15 @@ async def verify_key(
     # ── Real verification: make a minimal Groq API call ────────────────────────
     try:
         probe_llm = ChatGroq(model=model, api_key=raw_key, temperature=0.0)
-        probe_result = probe_llm.invoke([SystemMessage(content="You are a test assistant."),
-                                          HumanMessage(content=_VERIFY_PROBE)])
+        # A synchronous Groq round trip; awaited in a thread so one visitor's
+        # key check cannot stall every other request on the event loop.
+        probe_result = await asyncio.to_thread(
+            probe_llm.invoke,
+            [
+                SystemMessage(content="You are a test assistant."),
+                HumanMessage(content=_VERIFY_PROBE),
+            ],
+        )
         reply = str(probe_result.content).strip()
         # A valid key will produce any coherent response
         if not reply:
@@ -1517,7 +1608,8 @@ async def chat_endpoint(
 
         execution = None
         try:
-            execution = _prepare_chat_execution(
+            execution = await asyncio.to_thread(
+                _prepare_chat_execution,
                 payload,
                 x_session_token,
                 streaming=False,
@@ -1536,7 +1628,8 @@ async def chat_endpoint(
                     streaming=False,
                     request_id=execution["request_id"],
                 ):
-                    result = execution["graph"].invoke(
+                    result = await asyncio.to_thread(
+                        execution["graph"].invoke,
                         execution["invoke_payload"],
                         config=execution["config"],
                     )
@@ -1555,7 +1648,8 @@ async def chat_endpoint(
                 )
             response.turn_id = turn_id
             _mark_turn(record, TURN_COMPLETED, _response_payload(response))
-            _persist_completed_turn(client_id, thread_id, turn_id, payload.message.strip(), response)
+            if execution["early_response"] is None:
+                _persist_completed_turn(client_id, thread_id, turn_id, payload.message.strip(), response)
             return response
         except HTTPException:
             _restore_checkpoint(execution)
@@ -1571,11 +1665,11 @@ async def chat_endpoint(
 @app.get("/api/health")
 def health_check():
     """Backend health — safe to call publicly, never returns keys."""
-    env_configured = bool(os.getenv("GROQ_API_KEY"))
+    env_key_configured = _configured_groq_api_key() is not None
     active_sessions = sum(1 for v in _session_store.values() if not v.is_expired())
     return {
         "status": "healthy",
-        "env_key_configured": env_configured,
+        "env_key_configured": env_key_configured,
         "active_visitor_sessions": active_sessions,
         "model": GROQ_DEFAULT_MODEL,
     }
@@ -1671,7 +1765,7 @@ async def upload_document(
                 status_code=413,
                 detail=f"File exceeds the {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB upload limit.",
             )
-        meta = doc_index.stage_document(safe_filename, content)
+        meta = await asyncio.to_thread(doc_index.stage_document, safe_filename, content)
         _index_document_async(session_id, meta.doc_id, session_entry.client_id, content)
         return UploadDocumentResponse(
             status="success",

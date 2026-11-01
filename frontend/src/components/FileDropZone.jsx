@@ -55,13 +55,13 @@ export default function FileDropZone({
       {isUploading ? (
         <div className="file-drop-content">
           <div className="file-drop-spinner" />
-          <span className="file-drop-text">Extracting & indexing document chunks...</span>
+          <span className="file-drop-text">Extracting and preparing document chunks...</span>
         </div>
       ) : uploadedFile ? (
         <div className="file-drop-content">
           <span className="file-drop-icon">📄</span>
           <span className="file-drop-text">
-            {uploadedFile.name} ({uploadedFile.size} KB, {uploadedFile.chunks} chunks)
+            {uploadedFile.name} ({uploadedFile.size} KB, {uploadedFile.chunks} chunks queued)
           </span>
           <button
             type="button"
@@ -79,7 +79,7 @@ export default function FileDropZone({
             <span className="file-drop-text">
               {isDragOver ? 'Drop PDF, DOCX, or TXT here...' : 'Drop PDF, DOCX, or TXT file or browse'}
             </span>
-            <span className="file-drop-subtext">Supported: .pdf, .docx, .txt (up to 15MB)</span>
+            <span className="file-drop-subtext">Supported: .pdf, .docx, .txt (up to 30MB)</span>
           </div>
           <input
             type="file"

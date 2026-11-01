@@ -54,7 +54,11 @@ function sessionHeaders(sessionToken, headers = {}) {
 
 async function parseResponse(res, fallbackMessage) {
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `${fallbackMessage} (${res.status})`);
+  if (!res.ok) {
+    const error = new Error(data.detail || `${fallbackMessage} (${res.status})`);
+    error.status = res.status;
+    throw error;
+  }
   return data;
 }
 

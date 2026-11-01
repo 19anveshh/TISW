@@ -154,6 +154,8 @@ export default function App() {
     };
   }, [preferredThreadId]);
 
+  const activeDocumentCount = documents.filter((doc) => doc.status !== 'failed').length;
+
   // --- Toast helper ---
   const triggerToast = useCallback((msg, type = 'info') => {
     setToast(msg);
@@ -223,13 +225,13 @@ export default function App() {
     setRagEnabled(value);
     if (value) {
       triggerToast(
-        `Knowledge Base (RAG) enabled (${documents.length} document${documents.length === 1 ? '' : 's'})`,
+        `Knowledge Base (RAG) enabled (${activeDocumentCount} document${activeDocumentCount === 1 ? '' : 's'})`,
         'info'
       );
     } else {
       triggerToast('Knowledge Base (RAG) disabled — answering from general tutor knowledge', 'info');
     }
-  }, [documents.length, triggerToast]);
+  }, [activeDocumentCount, triggerToast]);
 
   // --- Scroll anchor ---
   // Position a new question once, then leave the scroll position alone while the
@@ -462,7 +464,7 @@ export default function App() {
         establishServerSession();
       }
 
-      setBackendStatus('offline');
+      if (!err.status) setBackendStatus('offline');
       triggerToast(errorMsg, 'error');
     } finally {
       if (activeRequestRef.current?.requestId === requestId) {
@@ -572,7 +574,7 @@ export default function App() {
         : 'Ask your topic — /normal to exit…';
     }
     if (ragEnabled) {
-      return `RAG Active (${documents.length} doc${documents.length === 1 ? '' : 's'}) — ask anything about your documents...`;
+      return `RAG Active (${activeDocumentCount} doc${activeDocumentCount === 1 ? '' : 's'}) — ask anything about your documents...`;
     }
     return 'Ask anything… or /tisw <topic>';
   })();
@@ -732,7 +734,7 @@ export default function App() {
               aria-pressed={ragEnabled}
             >
               <span className={`mode-dot ${ragEnabled ? 'mode-dot--rag' : ''}`} />
-              <span>{ragEnabled ? `RAG: ON (${documents.length})` : 'RAG: OFF'}</span>
+              <span>{ragEnabled ? `RAG: ON (${activeDocumentCount})` : 'RAG: OFF'}</span>
             </button>
             <button
               type="button"
@@ -866,7 +868,7 @@ export default function App() {
                            </div>
                          ) : (
                            <>
-                             <MarkdownRenderer content={msg.content || ''} />
+                             <MarkdownRenderer content={msg.content || ''} isStreaming={msg.isStreaming} />
                              {msg.isStreaming && <span className="streaming-cursor" aria-label="Response streaming" />}
                          </>
                        )}
@@ -933,7 +935,7 @@ export default function App() {
             <div className="file-zone-container">
               <FileDropZone
                 onUploadSuccess={(result) => {
-                  triggerToast(`${result.filename} uploaded & indexed`, 'success');
+                  triggerToast(`${result.filename} uploaded — indexing in the background`, 'info');
                   setRagEnabled(true);
                   fetchDocuments(sessionToken)
                     .then((data) => setDocuments(data.documents || []))
@@ -985,11 +987,11 @@ export default function App() {
             <div className="input-controls">
               <button
                 type="button"
-                className={`input-icon-btn ${documents.length > 0 ? 'input-icon-btn--has-docs' : ''}`}
+                className={`input-icon-btn ${activeDocumentCount > 0 ? 'input-icon-btn--has-docs' : ''}`}
                 onClick={() => setShowFileZone((prev) => !prev)}
                 title={
-                  documents.length > 0
-                    ? `${documents.length} document(s) uploaded — click to add more`
+                  activeDocumentCount > 0
+                    ? `${activeDocumentCount} active document(s) — click to add more`
                     : 'Attach PDF, DOCX, or TXT document'
                 }
                 aria-label="Attach document"
@@ -1020,7 +1022,7 @@ export default function App() {
         {activeSheet === 'start' && (
           <StartHereSheet
             sessionToken={sessionToken}
-            documentCount={documents.length}
+            documentCount={activeDocumentCount}
             onOpenGroq={() => setActiveSheet('groq')}
             onOpenDocuments={handleOpenDocuments}
             onOpenFaq={() => setActiveSheet('faq')}
@@ -1049,7 +1051,7 @@ export default function App() {
             }}
             onToggleRag={() => handleToggleRag(!ragEnabled)}
             ragEnabled={ragEnabled}
-            documentCount={documents.length}
+            documentCount={activeDocumentCount}
             tracingPreference={tracingPreference}
             tracingAvailable={runtimeStatus.tracingAvailable}
             offline={runtimeStatus.offline}

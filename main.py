@@ -461,6 +461,18 @@ def _prepare_tutor_turn(state: TutorState) -> dict[str, Any]:
             )
         else:
             tisw_part = TISW_PARTS
+    elif (
+        not fixed_response
+        and current_mode == "tisw"
+        and tisw_part <= 0
+        and (normalized in _CONTINUE_TEXTS or normalized in _ALL_TEXTS)
+    ):
+        # Bare "continue" with nothing in progress must not become a new
+        # walkthrough whose topic is the literal word the student typed.
+        fixed_response = (
+            "There is no paged walkthrough in progress. Ask a question, or start one "
+            "with /tisw <topic>."
+        )
     elif not fixed_response and current_mode == "tisw" and tisw_part > 0:
         if normalized in _CONTINUE_TEXTS:
             if tisw_part < TISW_PARTS:

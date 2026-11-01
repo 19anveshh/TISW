@@ -74,6 +74,20 @@ async function run() {
     throw new Error(`frontend request payload changed: ${JSON.stringify(requestBody)}`);
   }
 
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 422,
+    json: async () => ({ detail: 'The request is invalid.' }),
+  });
+  try {
+    await streamChatMessage({ message: 'Invalid', threadId: 'thread-a', turnId: 'bad-turn' });
+    throw new Error('HTTP error was accepted');
+  } catch (error) {
+    if (error.message !== 'The request is invalid.' || error.status !== 422) throw error;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
   const malformedReader = fakeReader(['event: delta\ndata: {bad}\n\n']);
   try { await consumeSseReader(malformedReader); throw new Error('malformed event was accepted'); }
   catch (error) {

@@ -72,7 +72,7 @@ export default function StartHereSheet({
           <div>
             <h3 className="sheet-step-title">Upload your documents</h3>
             <p className="sheet-step-text">
-              Add <strong>PDF, DOCX, or TXT</strong> files from the sidebar — up to 15 MB each
+              Add <strong>PDF, DOCX, or TXT</strong> files from the sidebar — up to 30 MB each
               and 10 documents per session. Turn on <strong>Knowledge Base (RAG)</strong> for
               document-based questions, complex queries, and answers that cite your material.
             </p>

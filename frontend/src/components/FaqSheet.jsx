@@ -71,7 +71,7 @@ const FAQ_ITEMS = [
       <>
         <p>
           <strong>PDF</strong>, <strong>DOCX</strong>, and <strong>TXT</strong>. Each file can be
-          up to <strong>15 MB</strong>, and a session holds up to <strong>10 documents</strong>.
+          up to <strong>30 MB</strong>, and a session holds up to <strong>10 documents</strong>.
           PDFs keep one-indexed page numbers when the parser provides them; DOCX and TXT are
           treated as having no page number, so none is invented.
         </p>
