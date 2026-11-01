@@ -53,9 +53,19 @@ function sessionHeaders(sessionToken, headers = {}) {
 }
 
 async function parseResponse(res, fallbackMessage) {
-  const data = await res.json().catch(() => ({}));
+  const contentType = res.headers.get("content-type") || "";
+  let data = {};
+  if (contentType.includes("application/json")) {
+    data = await res.json().catch(() => ({}));
+  } else {
+    // Proxies may return HTML when rejecting a large request body, not JSON.
+    await res.text().catch(() => "");
+  }
   if (!res.ok) {
-    const error = new Error(data.detail || `${fallbackMessage} (${res.status})`);
+    const detail = data.detail || (res.status === 413
+      ? "The upload was rejected as too large by the server or hosting proxy (HTTP 413). TISW's app limit is 30 MB; check the deployed RAG_MAX_FILE_SIZE_BYTES setting and host request-body limit."
+      : `${fallbackMessage} (${res.status})`);
+    const error = new Error(detail);
     error.status = res.status;
     throw error;
   }
@@ -325,6 +335,7 @@ export async function getRuntimeStatus() {
 // ─── File & Document Management ───────────────────────────────────────────────
 
 export const SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".txt"];
+export const MAX_UPLOAD_SIZE_BYTES = 30 * 1024 * 1024;
 
 /**
  * Uploads a study document for hybrid RAG indexing.
@@ -334,9 +345,13 @@ export const SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".txt"];
  * @param {string|null} [sessionToken]
  */
 export async function uploadFile(file, sessionToken) {
+  if (!file) throw new Error("Choose a file to upload.");
   const ext = "." + (file.name.split(".").pop() || "").toLowerCase();
   if (!SUPPORTED_EXTENSIONS.includes(ext)) {
     throw new Error(`Unsupported file type '${ext}'. Please upload a PDF, DOCX, or TXT file.`);
+  }
+  if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+    throw new Error(`'${file.name}' is ${(file.size / 1048576).toFixed(1)} MB. The app limit is 30 MB.`);
   }
 
   const formData = new FormData();
