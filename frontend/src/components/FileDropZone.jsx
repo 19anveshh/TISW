@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from 'react';
-import { uploadFile } from '../lib/api';
+import { uploadFile, MAX_UPLOAD_SIZE_BYTES } from '../lib/api';
 
 /**
  * FileDropZone — Drag-and-drop file upload area for RAG document ingestion.
@@ -16,6 +16,15 @@ export default function FileDropZone({
   const [uploadedFile, setUploadedFile] = useState(null);
 
   const processFile = useCallback(async (file) => {
+    if (!file || disabled) return;
+    if (!sessionToken) {
+      onUploadError?.('Configure a Groq API key before uploading documents.');
+      return;
+    }
+    if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+      onUploadError?.(`'${file.name}' is ${(file.size / 1048576).toFixed(1)} MB. The app limit is 30 MB.`);
+      return;
+    }
     setIsUploading(true);
     setUploadedFile(null);
 
@@ -28,7 +37,7 @@ export default function FileDropZone({
     } finally {
       setIsUploading(false);
     }
-  }, [onUploadError, onUploadSuccess, sessionToken]);
+  }, [disabled, onUploadError, onUploadSuccess, sessionToken]);
 
   const handleDrop = useCallback(async (e) => {
     e.preventDefault();
@@ -86,7 +95,7 @@ export default function FileDropZone({
             onChange={handleFileSelect}
             accept=".pdf,.docx,.txt"
             className="file-drop-input"
-            disabled={disabled}
+            disabled={disabled || isUploading}
           />
         </label>
       )}
