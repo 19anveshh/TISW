@@ -82,7 +82,19 @@ def run_api_tests(_offline_guard):
     assert "Unsupported file type" in res_bad.json()["detail"]
     print("✓ Non-supported file extension rejected (.exe -> 400)")
 
-    print("\n=== 4. Testing Uploading TXT Document ===")
+    print("\n=== 4. Testing Configured Upload Size Limit ===")
+    # Exercise the 413 path with a tiny patched limit instead of allocating 30 MB.
+    with patch.object(server, "MAX_FILE_SIZE_BYTES", 64):
+        oversized = client.post(
+            "/api/upload",
+            files={"file": ("oversized.txt", b"x" * 65, "text/plain")},
+            headers={"X-Session-Token": token_a},
+        )
+    assert oversized.status_code == 413, oversized.text
+    assert "upload limit" in oversized.json()["detail"].lower()
+    print("✓ Oversized request receives a clear 413 response")
+
+    print("\n=== 5. Testing Uploading TXT Document ===")
     txt_content = b"""
     Operating Systems: Virtual Memory and Paging
     Virtual memory is a storage allocation scheme in which secondary memory can be addressed as though it were part of main memory.
@@ -115,7 +127,7 @@ def run_api_tests(_offline_guard):
         raise AssertionError(f"Document {doc_id_a} never reached 'ready' status")
     print("✓ Background indexing completed")
 
-    print("\n=== 5. Testing Document Listing ===")
+    print("\n=== 6. Testing Document Listing ===")
     res_list = client.get(
         "/api/documents",
         headers={"X-Session-Token": token_a},
@@ -127,7 +139,7 @@ def run_api_tests(_offline_guard):
     assert docs[0]["filename"] == "operating_systems.txt"
     print(f"✓ Listed {len(docs)} document(s) for session A")
 
-    print("\n=== 6. Testing Session Isolation ===")
+    print("\n=== 7. Testing Session Isolation ===")
     # Session B should have 0 documents
     res_list_b = client.get(
         "/api/documents",
@@ -137,7 +149,7 @@ def run_api_tests(_offline_guard):
     assert len(res_list_b.json()["documents"]) == 0
     print("✓ Session B cannot see Session A's documents (strict isolation verified)")
 
-    print("\n=== 7. Testing RAG Chat with 0 Documents in Session B ===")
+    print("\n=== 8. Testing RAG Chat with 0 Documents in Session B ===")
     res_chat_empty = client.post(
         "/api/chat",
         json={"message": "What is virtual memory?", "rag_enabled": True},
@@ -149,7 +161,7 @@ def run_api_tests(_offline_guard):
     assert "no indexed documents are available yet" in reply_empty["response"].lower()
     print("✓ RAG ON with 0 documents instructs user to upload a document")
 
-    print("\n=== 8. Testing Hybrid Retrieval in Session A ===")
+    print("\n=== 9. Testing Hybrid Retrieval in Session A ===")
     index_a = get_session_document_index(token_a)
     chunks = index_a.hybrid_search("What causes a page fault and what is the MMU?", final_top_k=6)
     assert len(chunks) > 0
@@ -157,7 +169,7 @@ def run_api_tests(_offline_guard):
     assert "page fault" in chunks[0].text.lower() or "mmu" in chunks[0].text.lower()
     print(f"✓ Hybrid search retrieved {len(chunks)} chunks from session A's documents")
 
-    print("\n=== 9. Testing Mocked RAG Chat, Citations, and RAG-Off Behavior ===")
+    print("\n=== 10. Testing Mocked RAG Chat, Citations, and RAG-Off Behavior ===")
     fake_graph = FakeTutorGraph()
     retrieval_query = server._build_retrieval_query(
         fake_graph,
@@ -190,7 +202,7 @@ def run_api_tests(_offline_guard):
         assert fake_off_graph.last_payload["rag_context"] is None
     print("✓ RAG ON sends grounded context and real metadata; RAG OFF sends no document context")
 
-    print("\n=== 10. Testing Document Deletion ===")
+    print("\n=== 11. Testing Document Deletion ===")
     res_del = client.delete(
         f"/api/documents/{doc_id_a}",
         headers={"X-Session-Token": token_a},
