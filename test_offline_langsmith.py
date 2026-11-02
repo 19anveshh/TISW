@@ -74,6 +74,12 @@ def run_offline_langsmith_tests() -> None:
         assert config.tracing_requested is True
         assert config.tracing_enabled is True
         assert os.environ["LANGSMITH_TRACING_V2"] == "true"
+        # LangChain hard-rejects the V1 tracer names with
+        # "Tracing using LangChainTracerV1 is no longer supported", raised inside
+        # the graph run, so an enabled config must leave them switched off.
+        assert os.environ["LANGCHAIN_TRACING"] == "false"
+        assert os.environ["LANGSMITH_TRACING"] == "false"
+        assert os.environ["LANGCHAIN_TRACING_V2"] == "true"
 
     # Re-enter the safe default before importing the evaluator.
     runtime_config.configure_runtime(offline=True)

@@ -11,12 +11,17 @@ import os
 from dataclasses import dataclass
 
 
-_TRACE_VARS = (
-    "LANGSMITH_TRACING_V2",
-    "LANGCHAIN_TRACING_V2",
+_TRACE_V1_VARS = (
     "LANGSMITH_TRACING",
     "LANGCHAIN_TRACING",
 )
+
+_TRACE_V2_VARS = (
+    "LANGSMITH_TRACING_V2",
+    "LANGCHAIN_TRACING_V2",
+)
+
+_TRACE_VARS = _TRACE_V1_VARS + _TRACE_V2_VARS
 
 
 def _truthy(value: str | None) -> bool:
@@ -60,12 +65,17 @@ def configure_runtime(*, offline: bool | None = None) -> RuntimeConfig:
     config = read_runtime_config()
     enabled = config.tracing_enabled
     tracing_value = "true" if enabled else "false"
-    for name in _TRACE_VARS:
+
+    # LangChain rejects the V1 tracer names outright ("Tracing using
+    # LangChainTracerV1 is no longer supported") and raises it inside the graph
+    # run, where the chat endpoint relabels it as a Groq failure. Honour a V1
+    # request, but only ever switch on the supported V2 names.
+    for name in _TRACE_V1_VARS:
+        os.environ[name] = "false"
+    for name in _TRACE_V2_VARS:
         os.environ[name] = tracing_value
 
     if enabled:
-        os.environ["LANGSMITH_TRACING_V2"] = "true"
-        os.environ["LANGCHAIN_TRACING_V2"] = "true"
         os.environ.setdefault("LANGSMITH_PROJECT", config.langsmith_project)
 
     return RuntimeConfig(

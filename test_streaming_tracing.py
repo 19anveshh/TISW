@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 import server
+import tracing
 from main import create_tutor_streaming_graph
 
 
@@ -61,6 +62,43 @@ class FakeSyncGraph:
 @contextmanager
 def _fake_trace_context(*_args, **_kwargs):
     yield
+
+
+class FakeRun:
+    """Stand-in for a langsmith RunTree: records payloads, never touches a network."""
+
+    def __init__(self, name: str, kwargs: dict):
+        self.name = name
+        self.kwargs = kwargs
+        self.outputs: list[dict] = []
+        self.metadata: list[dict] = []
+        self.tags: list[list[str]] = []
+
+    def add_outputs(self, outputs: dict) -> None:
+        self.outputs.append(outputs)
+
+    def add_metadata(self, metadata: dict) -> None:
+        self.metadata.append(metadata)
+
+    def add_tags(self, tags: list[str]) -> None:
+        self.tags.append(list(tags))
+
+    def post(self) -> None:
+        raise AssertionError("tracing tests must not post to LangSmith")
+
+    def patch(self, *_args, **_kwargs) -> None:
+        raise AssertionError("tracing tests must not post to LangSmith")
+
+
+@contextmanager
+def fake_trace(name: str, run_type: str = "chain", **kwargs):
+    """A langsmith.trace replacement that yields a recorder instead of a RunTree."""
+    run = FakeRun(name, {"run_type": run_type, **kwargs})
+    FakeRun.created.append(run)
+    yield run
+
+
+FakeRun.created = []
 
 
 def _events(text: str) -> list[dict]:
@@ -126,7 +164,7 @@ def run_streaming_tracing_tests() -> None:
     with patch.object(server, "is_offline_mode", return_value=False), \
          patch.object(server, "tutor_stream_app", streaming_graph), \
          patch.object(server, "tutor_app", sync_graph), \
-         patch.object(server, "_request_tracing_context", side_effect=_fake_trace_context):
+         patch.object(server, "_turn_trace_context", side_effect=_fake_trace_context):
         response = client.post(
             "/api/chat/stream",
             json={"message": "Explain this", "thread_id": "stream-test", "tracing_enabled": True},
@@ -151,7 +189,7 @@ def run_streaming_tracing_tests() -> None:
         graph = FakeStreamingGraph()
         with patch.object(server, "is_offline_mode", return_value=False), \
              patch.object(server, "tutor_stream_app", graph), \
-             patch.object(server, "_request_tracing_context", side_effect=_fake_trace_context):
+             patch.object(server, "_turn_trace_context", side_effect=_fake_trace_context):
             stream = server._stream_chat_events(
                 server.ChatRequest(message="prefix", thread_id="prefix-test"),
                 None,
@@ -207,7 +245,7 @@ def run_streaming_tracing_tests() -> None:
         diagnostics = []
         with patch.object(server, "is_offline_mode", return_value=False), \
              patch.object(server, "tutor_stream_app", graph), \
-             patch.object(server, "_request_tracing_context", side_effect=_fake_trace_context), \
+             patch.object(server, "_turn_trace_context", side_effect=_fake_trace_context), \
              patch.object(
                  server,
                  "_stream_diagnostic",
@@ -269,43 +307,98 @@ def run_streaming_tracing_tests() -> None:
         assert mock_events[-1]["data"]["mock"] is True
         assert offline_graph.calls == 0
 
-    # Runtime tracing context is request-scoped and does not mutate env flags.
+    # The turn root is request-scoped: it nests the LangChain run under itself,
+    # carries no raw thread id, and redacts the message it was opened with.
+    FakeRun.created.clear()
     with patch.object(server, "is_offline_mode", return_value=False), \
          patch.object(server, "_langsmith_key_configured", return_value=True), \
+         patch.object(tracing, "can_trace", return_value=True), \
+         patch("langsmith.trace", side_effect=fake_trace) as trace_factory, \
          patch("langsmith.tracing_context", side_effect=_fake_trace_context) as tracing_factory:
-        with server._request_tracing_context(
+        with server._turn_trace_context(
             True,
             thread_id="trace-thread",
-            mode="tisw",
-            rag_used=True,
-            streaming=True,
             request_id="request-1",
-        ):
+            streaming=True,
+            rag_enabled=True,
+            message="gsk_secrettoken explain this",
+        ) as turn_run:
+            assert turn_run is not None
+            assert tracing.spans_enabled() is True
+
+        assert [run.name for run in FakeRun.created] == ["tisw.turn"]
+        root_kwargs = FakeRun.created[0].kwargs
+        assert root_kwargs["project_name"] == "tisw"
+        assert "gsk_secrettoken" not in json.dumps(root_kwargs["inputs"])
+        assert "explain this" in root_kwargs["inputs"]["message"]
+        assert tracing.spans_enabled() is False
+
+    # The LangChain context is opened twice: once to make the root itself send,
+    # then with the root as parent so graph and model runs nest under the trace.
+    with patch.object(server, "is_offline_mode", return_value=False), \
+         patch.object(server, "_langsmith_key_configured", return_value=True), \
+         patch.object(tracing, "can_trace", return_value=True), \
+         patch("langsmith.trace", side_effect=fake_trace), \
+         patch("langsmith.tracing_context", side_effect=_fake_trace_context) as tracing_factory:
+        with server._turn_trace_context(
+            True,
+            thread_id="trace-thread",
+            request_id="request-1",
+            streaming=False,
+            rag_enabled=False,
+            message="plain question",
+        ) as turn_run:
             pass
-        assert tracing_factory.call_count == 1
+        assert tracing_factory.call_count == 2
         kwargs = tracing_factory.call_args.kwargs
         assert kwargs["enabled"] is True
+        assert kwargs["parent"] is turn_run
         assert kwargs["project_name"] == "tisw"
         assert kwargs["metadata"]["thread_id_hash"] != "trace-thread"
         assert "trace-thread" not in json.dumps(kwargs["metadata"])
 
     with patch.object(server, "is_offline_mode", return_value=False), \
          patch.object(server, "_langsmith_key_configured", return_value=True), \
+         patch.object(tracing, "can_trace", return_value=True), \
+         patch("langsmith.trace", side_effect=fake_trace) as trace_factory, \
          patch("langsmith.tracing_context", side_effect=_fake_trace_context) as tracing_factory:
-        with server._request_tracing_context(
+        with server._turn_trace_context(
             False,
             thread_id="off-thread",
-            mode="normal",
-            rag_used=False,
-            streaming=True,
             request_id="request-off",
+            streaming=True,
+            rag_enabled=False,
+            message="untraced question",
+        ) as turn_run:
+            assert turn_run is None
+            assert tracing.spans_enabled() is False
+        assert trace_factory.call_count == 0
+        assert tracing_factory.call_count == 1
+        assert tracing_factory.call_args.kwargs["enabled"] is False
+
+    # Without a server-side key the toggle alone can never open a trace.
+    with patch.object(server, "is_offline_mode", return_value=False), \
+         patch.object(server, "_langsmith_key_configured", return_value=False), \
+         patch.object(tracing, "can_trace", return_value=True), \
+         patch("langsmith.trace", side_effect=fake_trace) as trace_factory, \
+         patch("langsmith.tracing_context", side_effect=_fake_trace_context):
+        with server._turn_trace_context(
+            True,
+            thread_id="no-key-thread",
+            request_id="request-no-key",
+            streaming=True,
+            rag_enabled=True,
+            message="question without a key",
         ):
             pass
-        assert tracing_factory.call_args.kwargs["enabled"] is False
+        assert trace_factory.call_count == 0
 
     # A tracing exporter cleanup failure must not convert a completed model
     # response into the generic stream failure shown by the browser.
     class FailingTraceContext:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
         def __enter__(self):
             return self
 
@@ -313,10 +406,13 @@ def run_streaming_tracing_tests() -> None:
             raise RuntimeError("simulated trace exporter cleanup failure")
 
     trace_failure_graph = FakeStreamingGraph(answer="trace-safe response")
+    FakeRun.created.clear()
     with patch.object(server, "is_offline_mode", return_value=False), \
          patch.object(server, "tutor_stream_app", trace_failure_graph), \
          patch.object(server, "_langsmith_key_configured", return_value=True), \
-         patch("langsmith.tracing_context", return_value=FailingTraceContext()):
+         patch.object(tracing, "can_trace", return_value=True), \
+         patch("langsmith.trace", side_effect=fake_trace), \
+         patch("langsmith.tracing_context", side_effect=FailingTraceContext):
         response = client.post(
             "/api/chat/stream",
             json={
@@ -330,19 +426,25 @@ def run_streaming_tracing_tests() -> None:
         assert trace_events[-1]["event"] == "done"
         assert trace_events[-1]["data"]["response"] == "trace-safe response"
         assert trace_failure_graph.calls == 1
+        # The turn really was traced, so the failure was really in its cleanup.
+        assert [run.name for run in FakeRun.created][:1] == ["tisw.turn"]
+    assert tracing.spans_enabled() is False
 
     with patch.object(server, "is_offline_mode", return_value=True), \
          patch.object(server, "_langsmith_key_configured", return_value=True), \
+         patch.object(tracing, "can_trace", return_value=True), \
+         patch("langsmith.trace", side_effect=fake_trace) as trace_factory, \
          patch("langsmith.tracing_context", side_effect=AssertionError("offline tracing was constructed")):
-        with server._request_tracing_context(
+        with server._turn_trace_context(
             True,
             thread_id="offline-thread",
-            mode="normal",
-            rag_used=False,
-            streaming=False,
             request_id="request-2",
-        ):
-            pass
+            streaming=False,
+            rag_enabled=False,
+            message="offline question",
+        ) as offline_run:
+            assert offline_run is None
+        assert trace_factory.call_count == 0
 
     # The native streaming graph calls the model once and checkpoints one final answer.
     class FakeLLM:
@@ -395,7 +497,7 @@ def run_streaming_tracing_tests() -> None:
 
         with patch.object(server, "is_offline_mode", return_value=False), \
              patch.object(server, "tutor_stream_app", graph), \
-             patch.object(server, "_request_tracing_context", side_effect=_fake_trace_context):
+             patch.object(server, "_turn_trace_context", side_effect=_fake_trace_context):
             first_task = asyncio.create_task(_collect(server._stream_chat_events(payload_one, None)))
             await first_started.wait()
             second_task = asyncio.create_task(_collect(server._stream_chat_events(payload_two, None)))
@@ -428,7 +530,7 @@ def run_streaming_tracing_tests() -> None:
         parallel_graph = create_tutor_streaming_graph(ParallelLLM(), InMemorySaver())
         with patch.object(server, "is_offline_mode", return_value=False), \
              patch.object(server, "tutor_stream_app", parallel_graph), \
-             patch.object(server, "_request_tracing_context", side_effect=_fake_trace_context):
+             patch.object(server, "_turn_trace_context", side_effect=_fake_trace_context):
             task_a = asyncio.create_task(_collect(server._stream_chat_events(server.ChatRequest(message="thread-a", thread_id="a", turn_id="a1"), None)))
             task_b = asyncio.create_task(_collect(server._stream_chat_events(server.ChatRequest(message="thread-b", thread_id="b", turn_id="b1"), None)))
             await thread_starts["a"].wait()
@@ -460,7 +562,7 @@ def run_streaming_tracing_tests() -> None:
         retry_payload = server.ChatRequest(message="retry me", thread_id="retry-thread", turn_id="same-turn")
         with patch.object(server, "is_offline_mode", return_value=False), \
              patch.object(server, "tutor_stream_app", retry_graph), \
-             patch.object(server, "_request_tracing_context", side_effect=_fake_trace_context):
+             patch.object(server, "_turn_trace_context", side_effect=_fake_trace_context):
             cancel_task = asyncio.create_task(_collect(server._stream_chat_events(retry_payload, None)))
             await cancel_started.wait()
             cancel_task.cancel()
@@ -492,7 +594,7 @@ def run_streaming_tracing_tests() -> None:
         error_graph = create_tutor_streaming_graph(ErrorThenSuccess(), InMemorySaver())
         with patch.object(server, "is_offline_mode", return_value=False), \
              patch.object(server, "tutor_stream_app", error_graph), \
-             patch.object(server, "_request_tracing_context", side_effect=_fake_trace_context):
+             patch.object(server, "_turn_trace_context", side_effect=_fake_trace_context):
             failed = await _collect(server._stream_chat_events(server.ChatRequest(message="fails", thread_id="error-thread", turn_id="error-turn"), None))
             succeeded = await _collect(server._stream_chat_events(server.ChatRequest(message="fails", thread_id="error-thread", turn_id="error-turn"), None))
         assert failed[-1]["event"] == "error"

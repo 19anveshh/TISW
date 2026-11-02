@@ -15,6 +15,7 @@ export default function DocumentManager({
   onToast,
   documents,
   setDocuments,
+  tracingActive = false,
 }) {
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -93,7 +94,7 @@ export default function DocumentManager({
 
     setUploading(true);
     try {
-      const res = await uploadFile(file, sessionToken);
+      const res = await uploadFile(file, sessionToken, tracingActive);
       onToast?.(
         `Added ${file.name} — indexing ${res.chunk_count} ${res.chunk_count === 1 ? 'chunk' : 'chunks'} in the background`,
         'info',

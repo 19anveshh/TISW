@@ -100,6 +100,41 @@ requires a server-side LangSmith key and an explicit online opt-in. When
 `TISW_OFFLINE=true`, the control is disabled as `Trace unavailable` and every
 request remains untraced.
 
+One switch governs every trace a turn can produce. `tracing.py` opens a root
+run and names the stages LangChain cannot see, so a project view shows the whole
+flow rather than an isolated model call:
+
+```text
+tisw.upload            # the request path only; multipart carries the switch as X-Tracing-Enabled
+  rag.stage_document
+    rag.extract_text
+    rag.chunk
+tisw.ingest            # the worker thread has its own root; contextvars do not cross threads
+  rag.index_document
+    rag.load_embedding_model   # first build only; the model is a process-wide singleton
+    rag.embed_document
+    rag.index_merge
+  rag.persist_document
+tisw.turn              # one per chat request, streaming or not
+  rag.restore_documents
+  rag.query_build
+  rag.retrieve
+    rag.embed_query
+    rag.vector_search
+    rag.bm25_search
+    rag.rrf_fusion
+  rag.context_build
+  <LangGraph run and its Groq call, nested through the tracing context>
+  tisw.persist
+```
+
+A span carries counts, identifiers and short previews — never document bodies,
+and never a key: `gsk_…` and `lsv2_…` are replaced with `[REDACTED]`, and thread
+and session identifiers are hashed. With the switch off, or offline, or without
+a server-side key, the decorated functions run unwrapped and no LangSmith
+context is built at all. A LangSmith failure can never fail a turn: start,
+output and cleanup errors are logged and swallowed.
+
 The stream protocol uses JSON data frames:
 
 ```text
@@ -235,11 +270,11 @@ one and does not call the LLM pretending that retrieval occurred.
 - FastEmbed (`BAAI/bge-small-en-v1.5`) supplies semantic vectors.
 - BM25 supplies keyword candidates.
 - Each retriever contributes up to 10 candidates.
-- Weighted RRF uses semantic weight `0.5`, keyword weight `0.5`, and `k=60`:
+- Weighted RRF uses semantic weight `0.3`, keyword weight `0.7`, and `k=60`:
 
   ```text
-  score = 0.5 / (60 + semantic_rank)
-        + 0.5 / (60 + keyword_rank)
+  score = 0.3 / (60 + semantic_rank)
+        + 0.7 / (60 + keyword_rank)
   ```
 
   Ranks start at 1, missing ranks contribute nothing, duplicates collapse by
@@ -303,6 +338,7 @@ uv run python test_modes.py
 uv run python test_paging.py
 uv run python test_evaluations.py
 uv run python test_streaming_tracing.py
+uv run python test_tracing_spans.py
 
 cd frontend
 npm run build
@@ -312,7 +348,10 @@ npm run lint
 The tests cover all supported extractors, invalid files, chunk overlap,
 semantic and BM25 retrieval, RRF math, deduplication, six-result limiting,
 server-issued session boundaries, RAG-off behavior, RAG-on citations, and
-document removal. External Groq calls are mocked in API behavior tests.
+document removal. `test_tracing_spans.py` replaces the span emitter with a
+recorder and asserts the exact tree above, zero emissions when untraced, and no
+secret or document body in any payload. External Groq calls are mocked in API
+behavior tests.
 
 ## Evaluation framework
 

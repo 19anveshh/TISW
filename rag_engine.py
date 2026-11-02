@@ -7,9 +7,10 @@ Features:
 - Hybrid Retrieval:
     * Dense Vector Search via FastEmbed (BAAI/bge-small-en-v1.5)
     * Sparse Keyword Search via BM25Okapi (rank-bm25)
-- Fusion: Weighted Reciprocal Rank Fusion (RRF, 50/50 weights, k=60)
+- Fusion: Weighted Reciprocal Rank Fusion (RRF, 30/70 semantic/keyword weights, k=60)
 - Configurable top-k candidate selection (10 vector, 10 BM25 -> top 6 final)
 - Strict Session Isolation: Per-session document index and memory stores
+- Tracing: each ingest and retrieval stage emits a LangSmith span when a trace is open
 """
 
 import io
@@ -28,6 +29,8 @@ from pypdf import PdfReader
 from docx import Document as DocxDocument
 from rank_bm25 import BM25Okapi
 from fastembed import TextEmbedding
+
+import tracing
 
 
 # =====================================================================
@@ -50,6 +53,34 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _arg(args: tuple, kwargs: Dict[str, Any], index: int, name: str, default: Any = None) -> Any:
+    """Positional-or-keyword access for span payload projections."""
+    return tracing.arg_at(args, kwargs, index, name, default)
+
+
+def _chunk_summary(chunks: List[Any]) -> Dict[str, Any]:
+    texts = [getattr(chunk, "text", "") for chunk in chunks]
+    return {
+        "chunks": len(chunks),
+        "characters": sum(len(text) for text in texts),
+        "avg_chunk_characters": round(sum(len(text) for text in texts) / max(1, len(chunks))),
+        "pages": sorted({getattr(chunk, "page_number", None) for chunk in chunks} - {None}),
+    }
+
+
+def _metadata_summary(meta: Any) -> Dict[str, Any]:
+    if meta is None:
+        return {"document_present": False}
+    return {
+        "doc_id": meta.doc_id,
+        "filename": meta.filename,
+        "file_type": meta.file_type,
+        "size_kb": meta.size_kb,
+        "chunk_count": meta.chunk_count,
+        "status": meta.status,
+    }
+
+
 CHUNK_SIZE_CHARS = _env_int("RAG_CHUNK_SIZE_CHARS", 1600)       # Approx 400-500 tokens
 CHUNK_OVERLAP_CHARS = min(
     _env_int("RAG_CHUNK_OVERLAP_CHARS", 250),
@@ -57,8 +88,8 @@ CHUNK_OVERLAP_CHARS = min(
 )                                                               # Approx 60-75 tokens
 VECTOR_CANDIDATES = _env_int("RAG_VECTOR_CANDIDATES", 10)      # Candidates from vector similarity
 BM25_CANDIDATES = _env_int("RAG_BM25_CANDIDATES", 10)          # Candidates from BM25 keyword search
-VECTOR_WEIGHT = 0.5                                             # RRF vector weight
-BM25_WEIGHT = 0.5                                               # RRF BM25 weight
+VECTOR_WEIGHT = 0.3                                             # RRF vector weight
+BM25_WEIGHT = 0.7                                               # RRF BM25 weight
 RRF_K = _env_int("RAG_RRF_K", 60)                               # RRF smoothing constant
 FINAL_TOP_K = _env_int("RAG_FINAL_TOP_K", 6)                    # Final chunks passed to the LLM
 MAX_FILE_SIZE_BYTES = _env_int("RAG_MAX_FILE_SIZE_BYTES", 30 * 1024 * 1024)  # 30 MB
@@ -67,6 +98,7 @@ EMBED_BATCH_SIZE = _env_int("RAG_EMBED_BATCH_SIZE", 8)                        # 
 # Cosine floor for vector candidates. Without it every question "grounds" on the
 # least-dissimilar chunks in the session, even when nothing is actually relevant.
 MIN_VECTOR_SCORE = _env_float("RAG_MIN_VECTOR_SCORE", 0.30)
+EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt"}
 
 # Ingestion lifecycle. 'indexing' documents are registered but not searchable yet.
@@ -137,8 +169,11 @@ def get_embedding_model() -> TextEmbedding:
     if _embedding_model is None:
         with _embedding_lock:
             if _embedding_model is None:
-                # BAAI/bge-small-en-v1.5 is fast (384-dim), accurate, and runs efficiently on CPU
-                _embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+                # The cold build downloads and compiles the ONNX graph, which is
+                # the slowest thing a first request of a deploy can do.
+                with tracing.child("rag.load_embedding_model", inputs={"model": EMBEDDING_MODEL_NAME}):
+                    # BAAI/bge-small-en-v1.5 is fast (384-dim), accurate, and runs efficiently on CPU
+                    _embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME)
     return _embedding_model
 
 
@@ -187,6 +222,19 @@ def validate_file_content(filename: str, file_bytes: bytes) -> None:
         raise ValueError(f"File '{filename}' contains binary data and is not a valid text file.")
 
 
+@tracing.traced(
+    "rag.extract_text",
+    inputs=lambda args, kwargs: {
+        "filename": os.path.basename(str(_arg(args, kwargs, 0, "filename", ""))),
+        "extension": os.path.splitext(str(_arg(args, kwargs, 0, "filename", "")))[1].lower(),
+        "size_kb": round(len(_arg(args, kwargs, 1, "file_bytes", b"") or b"") / 1024, 1),
+    },
+    outputs=lambda sections: {
+        "sections": len(sections),
+        "pages_with_text": sum(1 for _text, page in sections if page is not None),
+        "characters": sum(len(text) for text, _page in sections),
+    },
+)
 def extract_text_from_file(filename: str, file_bytes: bytes) -> List[Tuple[str, Optional[int]]]:
     """
     Extracts text from supported document formats.
@@ -249,6 +297,17 @@ def extract_text_from_file(filename: str, file_bytes: bytes) -> List[Tuple[str, 
     return extracted_sections
 
 
+@tracing.traced(
+    "rag.chunk",
+    inputs=lambda args, kwargs: {
+        "doc_id": str(_arg(args, kwargs, 0, "doc_id", "")),
+        "filename": os.path.basename(str(_arg(args, kwargs, 1, "filename", ""))),
+        "sections": len(_arg(args, kwargs, 2, "sections", []) or []),
+        "chunk_size": _arg(args, kwargs, 3, "chunk_size", CHUNK_SIZE_CHARS),
+        "overlap": _arg(args, kwargs, 4, "overlap", CHUNK_OVERLAP_CHARS),
+    },
+    outputs=_chunk_summary,
+)
 def chunk_document(
     doc_id: str,
     filename: str,
@@ -423,6 +482,15 @@ class SessionDocumentIndex:
         self.bm25: Optional[BM25Okapi] = None
         self.pending: Dict[str, List[DocumentChunk]] = {}   # doc_id -> chunks awaiting embeddings
 
+    @tracing.traced(
+        "rag.stage_document",
+        inputs=lambda args, kwargs: {
+            "filename": os.path.basename(str(_arg(args, kwargs, 1, "filename", ""))),
+            "size_kb": round(len(_arg(args, kwargs, 2, "file_bytes", b"") or b"") / 1024, 1),
+            "doc_id": _arg(args, kwargs, 3, "doc_id"),
+        },
+        outputs=_metadata_summary,
+    )
     def stage_document(
         self,
         filename: str,
@@ -487,6 +555,11 @@ class SessionDocumentIndex:
             self.documents[doc_id] = meta
             return meta
 
+    @tracing.traced(
+        "rag.index_document",
+        inputs=lambda args, kwargs: {"doc_id": str(_arg(args, kwargs, 1, "doc_id", ""))},
+        outputs=_metadata_summary,
+    )
     def finish_document_indexing(self, doc_id: str) -> Optional[DocumentMetadata]:
         """Embeds a staged document outside the lock, then merges it into the live index."""
         with self.lock:
@@ -499,16 +572,27 @@ class SessionDocumentIndex:
         try:
             embedder = get_embedding_model()
             texts = [c.text for c in new_chunks]
-            # Small batches keep the ONNX arena flat: the default batch of 256
-            # peaks near 1.2 GB on a full-size document, which free-tier hosts
-            # OOM-kill mid-request and the browser reads that as 'Failed to fetch'.
-            new_vectors = np.array(
-                list(embedder.embed(texts, batch_size=EMBED_BATCH_SIZE)), dtype=np.float32
-            )
-            # L2 Normalize for cosine similarity via dot product
-            norms = np.linalg.norm(new_vectors, axis=1, keepdims=True)
-            norms = np.where(norms == 0, 1e-9, norms)
-            new_vectors = new_vectors / norms
+            with tracing.child(
+                "rag.embed_document",
+                inputs={"doc_id": doc_id, "chunks": len(new_chunks), "batch_size": EMBED_BATCH_SIZE},
+            ) as embed_run:
+                # Small batches keep the ONNX arena flat: the default batch of 256
+                # peaks near 1.2 GB on a full-size document, which free-tier hosts
+                # OOM-kill mid-request and the browser reads that as 'Failed to fetch'.
+                new_vectors = np.array(
+                    list(embedder.embed(texts, batch_size=EMBED_BATCH_SIZE)), dtype=np.float32
+                )
+                # L2 Normalize for cosine similarity via dot product
+                norms = np.linalg.norm(new_vectors, axis=1, keepdims=True)
+                norms = np.where(norms == 0, 1e-9, norms)
+                new_vectors = new_vectors / norms
+                tracing.add_outputs(
+                    embed_run,
+                    {
+                        "vectors": int(new_vectors.shape[0]),
+                        "dimensions": int(new_vectors.shape[1]),
+                    },
+                )
         except Exception:
             with self.lock:
                 self.pending.pop(doc_id, None)
@@ -517,20 +601,31 @@ class SessionDocumentIndex:
             raise
 
         with self.lock:
-            self.pending.pop(doc_id, None)
-            if doc_id not in self.documents:
-                return None  # removed while it was still indexing
+            with tracing.child(
+                "rag.index_merge",
+                inputs={"doc_id": doc_id, "chunks": len(new_chunks)},
+            ) as merge_run:
+                self.pending.pop(doc_id, None)
+                if doc_id not in self.documents:
+                    return None  # removed while it was still indexing
 
-            if self.embeddings is None or len(self.chunks) == 0:
-                self.embeddings = new_vectors
-            else:
-                self.embeddings = np.vstack([self.embeddings, new_vectors])
+                if self.embeddings is None or len(self.chunks) == 0:
+                    self.embeddings = new_vectors
+                else:
+                    self.embeddings = np.vstack([self.embeddings, new_vectors])
 
-            self.chunks.extend(new_chunks)
-            # Rebuild BM25 index with all chunks in session
-            self.bm25 = BM25Okapi([c.tokens for c in self.chunks])
-            meta.status = INDEX_STATUS_READY
-            return meta
+                self.chunks.extend(new_chunks)
+                # Rebuild BM25 index with all chunks in session
+                self.bm25 = BM25Okapi([c.tokens for c in self.chunks])
+                meta.status = INDEX_STATUS_READY
+                tracing.add_outputs(
+                    merge_run,
+                    {
+                        "session_chunks": len(self.chunks),
+                        "session_documents": len(self.documents),
+                    },
+                )
+                return meta
 
     def add_document(
         self,
@@ -585,6 +680,23 @@ class SessionDocumentIndex:
                 counts[doc.status] = counts.get(doc.status, 0) + 1
             return counts
 
+    @tracing.traced(
+        "rag.retrieve",
+        inputs=lambda args, kwargs: {
+            "session_id_hash": tracing.hash_id(getattr(_arg(args, kwargs, 0, "self"), "session_id", "")),
+            "query": tracing.preview(_arg(args, kwargs, 1, "query", "")),
+            "final_top_k": _arg(args, kwargs, 2, "final_top_k", FINAL_TOP_K),
+            "vector_candidates": _arg(args, kwargs, 3, "vector_candidates_k", VECTOR_CANDIDATES),
+            "bm25_candidates": _arg(args, kwargs, 4, "bm25_candidates_k", BM25_CANDIDATES),
+            "vector_weight": _arg(args, kwargs, 5, "vector_weight", VECTOR_WEIGHT),
+            "bm25_weight": _arg(args, kwargs, 6, "bm25_weight", BM25_WEIGHT),
+            "rrf_k": _arg(args, kwargs, 7, "rrf_k", RRF_K),
+        },
+        outputs=lambda chunks: {
+            **_chunk_summary(chunks),
+            "chunk_ids": [chunk.chunk_id for chunk in chunks],
+        },
+    )
     def hybrid_search(
         self,
         query: str,
@@ -621,31 +733,64 @@ class SessionDocumentIndex:
         # ── 1. Vector Similarity Search ────────────────────────────────────
         # A blocking ONNX call, deliberately outside the index lock: holding it
         # here froze uploads and deletes for the duration of every chat query.
-        embedder = get_embedding_model()
-        q_emb = list(embedder.embed([query]))[0]
+        with tracing.child("rag.embed_query", inputs={"query": tracing.preview(query)}) as embed_run:
+            embedder = get_embedding_model()
+            q_emb = list(embedder.embed([query]))[0]
+            tracing.add_outputs(embed_run, {"dimensions": len(q_emb)})
         q_vec = np.array(q_emb, dtype=np.float32)
         q_norm = np.linalg.norm(q_vec)
         if q_norm > 0:
             q_vec = q_vec / q_norm
 
-        sim_scores = np.dot(embeddings, q_vec)
-        v_ranked_indices = [
-            i for i in np.argsort(sim_scores)[::-1][:v_k]
-            if sim_scores[i] >= MIN_VECTOR_SCORE
-        ]
-        vector_results = [chunks[i] for i in v_ranked_indices]
+        with tracing.child(
+            "rag.vector_search",
+            inputs={
+                "index_chunks": total_chunks,
+                "candidates_k": v_k,
+                "min_score": MIN_VECTOR_SCORE,
+            },
+        ) as vector_run:
+            sim_scores = np.dot(embeddings, q_vec)
+            v_ranked_indices = [
+                i for i in np.argsort(sim_scores)[::-1][:v_k]
+                if sim_scores[i] >= MIN_VECTOR_SCORE
+            ]
+            vector_results = [chunks[i] for i in v_ranked_indices]
+            tracing.add_outputs(
+                vector_run,
+                {
+                    "candidates": len(vector_results),
+                    "top_score": round(float(max([float(sim_scores[i]) for i in v_ranked_indices], default=0.0)), 4),
+                    "chunk_ids": [chunks[i].chunk_id for i in v_ranked_indices],
+                },
+            )
 
         # ── 2. BM25 Keyword Search ─────────────────────────────────────────
-        q_tokens = tokenize_for_bm25(query)
-        bm25_results = []
-        if q_tokens:
-            bm25_scores = bm25.get_scores(q_tokens)
-            # Zero scores mean no keyword matched. Ranking them anyway injected
-            # arbitrary chunks into the fusion with half of the total weight.
-            b_ranked_indices = [
-                i for i in np.argsort(bm25_scores)[::-1][:b_k] if bm25_scores[i] > 0
-            ]
-            bm25_results = [chunks[i] for i in b_ranked_indices]
+        with tracing.child(
+            "rag.bm25_search",
+            inputs={"index_chunks": total_chunks, "candidates_k": b_k},
+        ) as bm25_run:
+            q_tokens = tokenize_for_bm25(query)
+            bm25_results = []
+            if q_tokens:
+                bm25_scores = bm25.get_scores(q_tokens)
+                # Zero scores mean no keyword matched. Ranking them anyway injected
+                # arbitrary chunks into the fusion with half of the total weight.
+                b_ranked_indices = [
+                    i for i in np.argsort(bm25_scores)[::-1][:b_k] if bm25_scores[i] > 0
+                ]
+                bm25_results = [chunks[i] for i in b_ranked_indices]
+            else:
+                b_ranked_indices = []
+            tracing.add_outputs(
+                bm25_run,
+                {
+                    "query_tokens": len(q_tokens),
+                    "candidates": len(bm25_results),
+                    "top_score": round(float(max([float(bm25_scores[i]) for i in b_ranked_indices], default=0.0)), 4),
+                    "chunk_ids": [chunks[i].chunk_id for i in b_ranked_indices],
+                },
+            )
 
         # ── 3. Weighted Reciprocal Rank Fusion (RRF) ───────────────────────
         fused = weighted_rrf(
@@ -660,6 +805,23 @@ class SessionDocumentIndex:
         return [chunk for chunk, _score in fused[:final_top_k]]
 
 
+@tracing.traced(
+    "rag.rrf_fusion",
+    inputs=lambda args, kwargs: {
+        "semantic_candidates": len(_arg(args, kwargs, 0, "semantic_results", []) or []),
+        "keyword_candidates": len(_arg(args, kwargs, 1, "keyword_results", []) or []),
+        "semantic_weight": _arg(args, kwargs, 2, "semantic_weight", VECTOR_WEIGHT),
+        "keyword_weight": _arg(args, kwargs, 3, "keyword_weight", BM25_WEIGHT),
+        "rrf_k": _arg(args, kwargs, 4, "rrf_k", RRF_K),
+    },
+    outputs=lambda fused: {
+        "fused": len(fused),
+        "scores": [
+            {"chunk_id": chunk.chunk_id, "score": round(score, 5)}
+            for chunk, score in fused[:10]
+        ],
+    },
+)
 def weighted_rrf(
     semantic_results: List[DocumentChunk],
     keyword_results: List[DocumentChunk],

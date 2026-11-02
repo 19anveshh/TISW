@@ -10,6 +10,7 @@ export default function FileDropZone({
   onUploadError,
   disabled,
   sessionToken,
+  tracingActive = false,
 }) {
   const [isDragOver, setIsDragOver] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -29,7 +30,7 @@ export default function FileDropZone({
     setUploadedFile(null);
 
     try {
-      const result = await uploadFile(file, sessionToken);
+      const result = await uploadFile(file, sessionToken, tracingActive);
       setUploadedFile({ name: file.name, size: result.size_kb, chunks: result.chunk_count });
       onUploadSuccess?.(result);
     } catch (err) {
@@ -37,7 +38,7 @@ export default function FileDropZone({
     } finally {
       setIsUploading(false);
     }
-  }, [disabled, onUploadError, onUploadSuccess, sessionToken]);
+  }, [disabled, onUploadError, onUploadSuccess, sessionToken, tracingActive]);
 
   const handleDrop = useCallback(async (e) => {
     e.preventDefault();

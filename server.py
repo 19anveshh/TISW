@@ -51,9 +51,9 @@ import copy
 import re
 import threading
 import traceback
-from contextlib import asynccontextmanager, contextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
-from typing import Optional, Dict, List, Any, AsyncIterator
+from typing import Optional, Dict, List, Tuple, Any, AsyncIterator
 
 # ── Windows UTF-8 console fix ──────────────────────────────────────────────────
 if sys.platform == "win32":
@@ -110,6 +110,7 @@ from rag_engine import (
     INDEX_STATUS_READY,
 )
 import persistence
+import tracing
 
 # ── Fallback: try to init global tutor_app if main.py left it as None ─────────
 if tutor_app is None and not is_offline_mode():
@@ -252,19 +253,53 @@ def _finish_document_indexing(
         return
     if meta is None or not client_id:
         return
-    try:
-        persistence.save_document(
-            client_id,
-            doc_id=meta.doc_id,
-            filename=meta.filename,
-            file_type=meta.file_type,
-            size_kb=meta.size_kb,
-            chunk_count=meta.chunk_count,
-            uploaded_at=meta.uploaded_at,
-            content=content,
-        )
-    except Exception as exc:
-        print(f"[PERSIST ERROR] {type(exc).__name__}", file=sys.stderr)
+    with tracing.child("rag.persist_document", inputs={"doc_id": doc_id}) as persist_run:
+        try:
+            persistence.save_document(
+                client_id,
+                doc_id=meta.doc_id,
+                filename=meta.filename,
+                file_type=meta.file_type,
+                size_kb=meta.size_kb,
+                chunk_count=meta.chunk_count,
+                uploaded_at=meta.uploaded_at,
+                content=content,
+            )
+            tracing.add_outputs(
+                persist_run,
+                {"persisted": True, "chunk_count": meta.chunk_count, "size_kb": meta.size_kb},
+            )
+        except Exception as exc:
+            print(f"[PERSIST ERROR] {type(exc).__name__}", file=sys.stderr)
+            tracing.add_outputs(persist_run, {"persisted": False, "error": type(exc).__name__})
+
+
+def _trace_document_indexing(
+    session_id: str,
+    doc_id: str,
+    client_id: Optional[str],
+    content: bytes,
+    tracing_enabled: bool,
+) -> None:
+    """Give the worker thread its own trace; contextvars do not cross threads."""
+    with tracing.root(
+        "tisw.ingest",
+        enabled=tracing_enabled,
+        inputs={
+            "doc_id": doc_id,
+            "size_kb": round(len(content or b"") / 1024, 1),
+        },
+        tags=["TISW", "ingest"],
+        metadata={
+            "application": "TISW",
+            "environment": "local",
+            "stage": "ingestion",
+            "session_id_hash": _safe_trace_id(session_id),
+        },
+        project_name=_langsmith_project(),
+    ) as run:
+        tracing.add_metadata(run, {"persisted": bool(client_id)})
+        _finish_document_indexing(session_id, doc_id, client_id, content)
 
 
 def _index_document_async(
@@ -272,6 +307,7 @@ def _index_document_async(
     doc_id: str,
     client_id: Optional[str] = None,
     content: bytes = b"",
+    tracing_enabled: bool = False,
 ) -> None:
     """
     Starts the embedding pass in a worker thread.
@@ -281,12 +317,17 @@ def _index_document_async(
     client polls for it.
     """
     threading.Thread(
-        target=_finish_document_indexing,
-        args=(session_id, doc_id, client_id, content),
+        target=_trace_document_indexing,
+        args=(session_id, doc_id, client_id, content, tracing_enabled),
         daemon=True,
     ).start()
 
 
+@tracing.traced(
+    "rag.restore_documents",
+    inputs=lambda args, kwargs: {"session_id_hash": _safe_trace_id(str(args[0] if args else ""))},
+    outputs=lambda _: {"completed": True},
+)
 def _restore_documents_for_session(session_id: str, entry: _SessionEntry) -> None:
     """Re-index this visitor's stored documents once per issued session."""
     if not entry.client_id or entry.documents_restored:
@@ -313,7 +354,9 @@ def _restore_documents_for_session(session_id: str, entry: _SessionEntry) -> Non
         except Exception as exc:
             print(f"[DOC RESTORE ERROR] {type(exc).__name__}", file=sys.stderr)
             continue
-        _index_document_async(session_id, meta.doc_id)
+        # Restores happen inside a chat turn, so the follow-up index build keeps
+        # the same switch the browser asked for.
+        _index_document_async(session_id, meta.doc_id, tracing_enabled=tracing.spans_enabled())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -553,6 +596,14 @@ def enrich_message(user_text: str, mode: Optional[str] = None) -> str:
     return user_text
 
 
+@tracing.traced(
+    "rag.query_build",
+    inputs=lambda args, kwargs: {"user_text": tracing.preview(tracing.arg_at(args, kwargs, 2, "user_text", ""))},
+    outputs=lambda query: {
+        "query": tracing.preview(query),
+        "query_characters": len(query or ""),
+    },
+)
 def _build_retrieval_query(graph: Any, config: Dict[str, Any], user_text: str) -> str:
     """Add recent context for short/ambiguous follow-ups without changing the prompt."""
     slash = parse_slash_command(user_text)
@@ -643,16 +694,26 @@ def _seed_graph_history(
         print(f"[HISTORY SEED ERROR] {type(exc).__name__}", file=sys.stderr)
 
 
+@tracing.traced(
+    "tisw.persist",
+    inputs=lambda args, kwargs: {
+        "client_scoped": bool(tracing.arg_at(args, kwargs, 0, "client_id")),
+        "thread_id_hash": _safe_trace_id(str(tracing.arg_at(args, kwargs, 1, "thread_id", ""))),
+        "turn_id": str(tracing.arg_at(args, kwargs, 2, "turn_id", "")),
+        "question_characters": len(str(tracing.arg_at(args, kwargs, 3, "user_text", "") or "")),
+    },
+    outputs=lambda persisted: {"persisted": bool(persisted)},
+)
 def _persist_completed_turn(
     client_id: Optional[str],
     thread_id: str,
     turn_id: str,
     user_text: str,
     response: ChatResponse,
-) -> None:
+) -> bool:
     """Store one finished exchange; persistence failures never fail the reply."""
     if not client_id:
-        return
+        return False
     try:
         persistence.record_turn(
             client_id,
@@ -666,6 +727,8 @@ def _persist_completed_turn(
         )
     except Exception as exc:
         print(f"[PERSIST ERROR] {type(exc).__name__}", file=sys.stderr)
+        return False
+    return True
 
 
 def _request_thread_id(payload: ChatRequest) -> str:
@@ -829,6 +892,11 @@ def _safe_trace_id(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
+def _header_enabled(value: Optional[str]) -> bool:
+    """Multipart uploads carry no JSON body, so the Trace switch arrives as a header."""
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 _SECRET_LOG_PATTERN = re.compile(r"(?i)(?:gsk_[A-Za-z0-9_-]+|lsv2_[A-Za-z0-9_-]+)")
 
 
@@ -919,39 +987,70 @@ def _nonfatal_tracing_context(trace_context: Any):
             _log_safe_exception("TRACE ERROR", exc)
 
 
-def _request_tracing_context(
+@contextmanager
+def _turn_trace_context(
     requested: bool,
     *,
     thread_id: str,
-    mode: str,
-    rag_used: bool,
-    streaming: bool,
     request_id: str,
+    streaming: bool,
+    rag_enabled: bool,
+    message: str,
 ):
-    """Create a request-scoped LangSmith context without changing process env."""
+    """One LangSmith trace for a whole turn: retrieval, graph, Groq call, persistence.
+
+    The root opens before preparation because retrieval happens there; a span with
+    no parent lands as its own trace instead of under the turn.
+    """
     if is_offline_mode():
-        return nullcontext()
+        yield None
+        return
 
     from langsmith import tracing_context
 
     if not requested or not _langsmith_key_configured():
         # Explicitly disable ambient environment tracing for this request.
-        return _nonfatal_tracing_context(tracing_context(enabled=False))
+        with _nonfatal_tracing_context(tracing_context(enabled=False)):
+            yield None
+        return
 
-    return _nonfatal_tracing_context(tracing_context(
+    tags = ["TISW", "streaming" if streaming else "non-streaming"]
+    metadata = {
+        "application": "TISW",
+        "environment": "local",
+        "request_id": request_id,
+        "thread_id_hash": _safe_trace_id(thread_id),
+        "rag_enabled": rag_enabled,
+        "streaming": streaming,
+    }
+    with tracing.root(
+        "tisw.turn",
         enabled=True,
+        inputs={"message": tracing.redact(message)},
+        tags=tags,
+        metadata=metadata,
         project_name=_langsmith_project(),
-        tags=["TISW", "streaming" if streaming else "non-streaming", mode],
-        metadata={
-            "application": "TISW",
-            "environment": "local",
-            "mode": mode,
-            "request_id": request_id,
-            "thread_id_hash": _safe_trace_id(thread_id),
-            "rag_enabled": rag_used,
-            "streaming": streaming,
-        },
-    ))
+    ) as run:
+        if run is None:
+            yield None
+            return
+        with _nonfatal_tracing_context(tracing_context(
+            enabled=True,
+            parent=run,
+            project_name=_langsmith_project(),
+            tags=list(tags),
+            metadata=dict(metadata),
+        )):
+            yield run
+
+
+def _annotate_turn(run: Any, execution: dict[str, Any]) -> None:
+    """Add what only preparation knows — the mode and whether RAG grounded the turn."""
+    tracing.add_metadata(run, {
+        "mode": execution["mode"],
+        "rag_used": execution["rag_used"],
+    })
+    tracing.add_tags(run, [execution["mode"]])
 
 
 def _resolve_chat_graph(session_token: Optional[str], *, streaming: bool):
@@ -969,6 +1068,39 @@ def _resolve_chat_graph(session_token: Optional[str], *, streaming: bool):
             detail="No API key configured. Please verify your Groq API key using the sidebar.",
         )
     return graph
+
+
+@tracing.traced(
+    "rag.context_build",
+    inputs=lambda args, kwargs: {
+        "retrieved": len(tracing.arg_at(args, kwargs, 0, "retrieved_chunks", []) or [])
+    },
+    outputs=lambda built: {
+        "context_characters": len(built[0]),
+        "citations": len(built[1]),
+        "sources": [
+            {"filename": source.filename, "page_number": source.page_number, "chunk_id": source.chunk_id}
+            for source in built[1]
+        ],
+    },
+)
+def _build_rag_context(retrieved_chunks: List[Any]) -> Tuple[str, List[SourceItem]]:
+    """Format retrieved chunks for the prompt and turn them into client citations."""
+    context_blocks: List[str] = []
+    sources: List[SourceItem] = []
+    for i, chunk in enumerate(retrieved_chunks, start=1):
+        page_info = f", Page {chunk.page_number}" if chunk.page_number is not None else ""
+        context_blocks.append(
+            f"--- EXCERPT {i} ---\n[Source: {chunk.filename}{page_info} | Chunk ID: {chunk.chunk_id}]\n{chunk.text}"
+        )
+        snippet = chunk.text[:220].strip() + ("…" if len(chunk.text) > 220 else "")
+        sources.append(SourceItem(
+            filename=chunk.filename,
+            page_number=chunk.page_number,
+            chunk_id=chunk.chunk_id,
+            snippet=snippet,
+        ))
+    return "\n\n".join(context_blocks), sources
 
 
 def _prepare_chat_execution(
@@ -1081,20 +1213,7 @@ def _prepare_chat_execution(
             retrieved_chunks = doc_index.hybrid_search(query=retrieval_query, final_top_k=FINAL_TOP_K)
             if retrieved_chunks:
                 rag_used = True
-                context_blocks = []
-                for i, chunk in enumerate(retrieved_chunks, start=1):
-                    page_info = f", Page {chunk.page_number}" if chunk.page_number is not None else ""
-                    context_blocks.append(
-                        f"--- EXCERPT {i} ---\n[Source: {chunk.filename}{page_info} | Chunk ID: {chunk.chunk_id}]\n{chunk.text}"
-                    )
-                    snippet = chunk.text[:220].strip() + ("…" if len(chunk.text) > 220 else "")
-                    sources.append(SourceItem(
-                        filename=chunk.filename,
-                        page_number=chunk.page_number,
-                        chunk_id=chunk.chunk_id,
-                        snippet=snippet,
-                    ))
-                rag_context_str = "\n\n".join(context_blocks)
+                rag_context_str, sources = _build_rag_context(retrieved_chunks)
             else:
                 rag_context_str = "[No relevant excerpts were found in the uploaded documents for this question.]"
             invoke_payload = {"messages": [HumanMessage(content=enriched)], "rag_context": rag_context_str}
@@ -1325,66 +1444,71 @@ async def _stream_chat_events_locked(
     final_response = ""
     final_state: Optional[dict[str, Any]] = None
     try:
-        # Retrieval embeds the query and a restore re-chunks documents; both are
-        # blocking CPU work, so preparation runs off the event loop.
-        execution = await asyncio.to_thread(
-            _prepare_chat_execution,
-            payload,
-            session_token,
-            streaming=True,
+        with _turn_trace_context(
+            bool(payload.tracing_enabled),
             thread_id=thread_id,
-            turn_id=turn_id,
             request_id=request_id,
-            client_id=client_id,
-        )
-        graph_message = (
-            execution["invoke_payload"]["messages"][-1].content
-            if execution["invoke_payload"]
-            else None
-        )
-        _stream_diagnostic(
-            "graph_input",
-            request_id=execution["request_id"],
-            turn_id=turn_id,
-            thread_id=thread_id,
-            message=str(graph_message) if graph_message is not None else None,
-            source="live_generation",
-        )
-        yield _sse_event("start", {
-            "request_id": execution["request_id"],
-            "thread_id": execution["thread_id"],
-            "turn_id": turn_id,
-            "mode": execution["mode"],
-            "tracing_enabled": bool(
-                execution["trace_requested"]
-                and not is_offline_mode()
-                and _langsmith_key_configured()
-            ),
-        })
-
-        if execution["early_response"] is not None:
-            final_response = execution["early_response"].response
-            early_response = execution["early_response"]
-            early_response.turn_id = turn_id
-            early_payload = _response_payload(early_response)
-            _mark_turn(record, TURN_COMPLETED, early_payload)
-            # Upload guidance is interface state, not teaching: persisting it
-            # replayed "no documents uploaded" back into later model context.
-            if final_response:
-                emitted_text = True
-                yield _sse_event("delta", {"text": final_response})
-            yield _sse_event("done", early_payload)
-            return
-
-        trace_context = _request_tracing_context(
-            execution["trace_requested"],
-            thread_id=execution["thread_id"],
-            mode=execution["mode"],
-            rag_used=execution["rag_used"],
             streaming=True,
-            request_id=execution["request_id"],
-        )
-        with trace_context:
+            rag_enabled=bool(payload.rag_enabled),
+            message=payload.message,
+        ) as trace_run:
+            # Retrieval embeds the query and a restore re-chunks documents; both are
+            # blocking CPU work, so preparation runs off the event loop.
+            execution = await asyncio.to_thread(
+                _prepare_chat_execution,
+                payload,
+                session_token,
+                streaming=True,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                request_id=request_id,
+                client_id=client_id,
+            )
+            _annotate_turn(trace_run, execution)
+            graph_message = (
+                execution["invoke_payload"]["messages"][-1].content
+                if execution["invoke_payload"]
+                else None
+            )
+            _stream_diagnostic(
+                "graph_input",
+                request_id=execution["request_id"],
+                turn_id=turn_id,
+                thread_id=thread_id,
+                message=str(graph_message) if graph_message is not None else None,
+                source="live_generation",
+            )
+            yield _sse_event("start", {
+                "request_id": execution["request_id"],
+                "thread_id": execution["thread_id"],
+                "turn_id": turn_id,
+                "mode": execution["mode"],
+                "tracing_enabled": bool(
+                    execution["trace_requested"]
+                    and not is_offline_mode()
+                    and _langsmith_key_configured()
+                ),
+            })
+
+            if execution["early_response"] is not None:
+                final_response = execution["early_response"].response
+                early_response = execution["early_response"]
+                early_response.turn_id = turn_id
+                early_payload = _response_payload(early_response)
+                _mark_turn(record, TURN_COMPLETED, early_payload)
+                # Upload guidance is interface state, not teaching: persisting it
+                # replayed "no documents uploaded" back into later model context.
+                if final_response:
+                    emitted_text = True
+                    yield _sse_event("delta", {"text": final_response})
+                tracing.add_outputs(trace_run, {
+                    "early_response": True,
+                    "mode": execution["mode"],
+                    "rag_used": execution["rag_used"],
+                })
+                yield _sse_event("done", early_payload)
+                return
+
             async for event in execution["graph"].astream_events(
                 execution["invoke_payload"],
                 config=execution["config"],
@@ -1413,37 +1537,44 @@ async def _stream_chat_events_locked(
                     if isinstance(output, dict):
                         final_state = output
 
-        if not final_response:
-            final_response = "".join(accumulated)
-        if not emitted_text and final_response:
-            yield _sse_event("delta", {"text": final_response})
-        if not final_response:
-            raise RuntimeError("Empty response from LangGraph.")
+            if not final_response:
+                final_response = "".join(accumulated)
+            if not emitted_text and final_response:
+                yield _sse_event("delta", {"text": final_response})
+            if not final_response:
+                raise RuntimeError("Empty response from LangGraph.")
 
-        paging_data = paging_payload(final_state) if final_state else None
-        response = ChatResponse(
-            response=final_response,
-            thread_id=execution["thread_id"],
-            turn_id=turn_id,
-            mode=execution["mode"],
-            rag_used=execution["rag_used"],
-            sources=execution["sources"],
-            paging=PagingInfo(**paging_data) if paging_data else None,
-        )
-        _stream_diagnostic(
-            "completed",
-            request_id=execution["request_id"],
-            turn_id=turn_id,
-            thread_id=thread_id,
-            response=final_response,
-            source="live_generation",
-        )
-        response_payload = _response_payload(response)
-        _mark_turn(record, TURN_COMPLETED, response_payload)
-        _persist_completed_turn(client_id, thread_id, turn_id, payload.message.strip(), response)
-        if execution["sources"]:
-            yield _sse_event("sources", {"sources": [source.model_dump() for source in execution["sources"]]})
-        yield _sse_event("done", response_payload)
+            paging_data = paging_payload(final_state) if final_state else None
+            response = ChatResponse(
+                response=final_response,
+                thread_id=execution["thread_id"],
+                turn_id=turn_id,
+                mode=execution["mode"],
+                rag_used=execution["rag_used"],
+                sources=execution["sources"],
+                paging=PagingInfo(**paging_data) if paging_data else None,
+            )
+            _stream_diagnostic(
+                "completed",
+                request_id=execution["request_id"],
+                turn_id=turn_id,
+                thread_id=thread_id,
+                response=final_response,
+                source="live_generation",
+            )
+            response_payload = _response_payload(response)
+            _mark_turn(record, TURN_COMPLETED, response_payload)
+            _persist_completed_turn(client_id, thread_id, turn_id, payload.message.strip(), response)
+            tracing.add_outputs(trace_run, {
+                "response_preview": tracing.redact(final_response),
+                "response_characters": len(final_response),
+                "mode": execution["mode"],
+                "rag_used": execution["rag_used"],
+                "sources": len(execution["sources"]),
+            })
+            if execution["sources"]:
+                yield _sse_event("sources", {"sources": [source.model_dump() for source in execution["sources"]]})
+            yield _sse_event("done", response_payload)
     except (asyncio.CancelledError, GeneratorExit):
         _restore_checkpoint(execution)
         _mark_turn(record, TURN_CANCELLED)
@@ -1607,50 +1738,66 @@ async def chat_endpoint(
             return _replay_response(record)
 
         execution = None
+        request_id = uuid.uuid4().hex
         try:
-            execution = await asyncio.to_thread(
-                _prepare_chat_execution,
-                payload,
-                x_session_token,
-                streaming=False,
+            with _turn_trace_context(
+                bool(payload.tracing_enabled),
                 thread_id=thread_id,
-                turn_id=turn_id,
-                client_id=client_id,
-            )
-            if execution["early_response"] is not None:
-                response = execution["early_response"]
-            else:
-                with _request_tracing_context(
-                    execution["trace_requested"],
-                    thread_id=execution["thread_id"],
-                    mode=execution["mode"],
-                    rag_used=execution["rag_used"],
+                request_id=request_id,
+                streaming=False,
+                rag_enabled=bool(payload.rag_enabled),
+                message=payload.message,
+            ) as trace_run:
+                execution = await asyncio.to_thread(
+                    _prepare_chat_execution,
+                    payload,
+                    x_session_token,
                     streaming=False,
-                    request_id=execution["request_id"],
-                ):
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    request_id=request_id,
+                    client_id=client_id,
+                )
+                _annotate_turn(trace_run, execution)
+                if execution["early_response"] is not None:
+                    response = execution["early_response"]
+                    tracing.add_outputs(trace_run, {
+                        "early_response": True,
+                        "mode": execution["mode"],
+                        "rag_used": execution["rag_used"],
+                    })
+                else:
                     result = await asyncio.to_thread(
                         execution["graph"].invoke,
                         execution["invoke_payload"],
                         config=execution["config"],
                     )
-                msgs = result.get("messages", [])
-                if not msgs:
-                    raise HTTPException(status_code=500, detail="Empty response from LangGraph.")
-                paging_data = paging_payload(result)
-                response = ChatResponse(
-                    response=str(msgs[-1].content),
-                    thread_id=execution["thread_id"],
-                    turn_id=turn_id,
-                    mode=result.get("active_mode", execution["mode"]),
-                    rag_used=execution["rag_used"],
-                    sources=execution["sources"],
-                    paging=PagingInfo(**paging_data) if paging_data else None,
-                )
-            response.turn_id = turn_id
-            _mark_turn(record, TURN_COMPLETED, _response_payload(response))
-            if execution["early_response"] is None:
-                _persist_completed_turn(client_id, thread_id, turn_id, payload.message.strip(), response)
-            return response
+                    msgs = result.get("messages", [])
+                    if not msgs:
+                        raise HTTPException(status_code=500, detail="Empty response from LangGraph.")
+                    paging_data = paging_payload(result)
+                    answer = str(msgs[-1].content)
+                    response = ChatResponse(
+                        response=answer,
+                        thread_id=execution["thread_id"],
+                        turn_id=turn_id,
+                        mode=result.get("active_mode", execution["mode"]),
+                        rag_used=execution["rag_used"],
+                        sources=execution["sources"],
+                        paging=PagingInfo(**paging_data) if paging_data else None,
+                    )
+                    tracing.add_outputs(trace_run, {
+                        "response_preview": tracing.redact(answer),
+                        "response_characters": len(answer),
+                        "mode": response.mode,
+                        "rag_used": execution["rag_used"],
+                        "sources": len(execution["sources"]),
+                    })
+                response.turn_id = turn_id
+                _mark_turn(record, TURN_COMPLETED, _response_payload(response))
+                if execution["early_response"] is None:
+                    _persist_completed_turn(client_id, thread_id, turn_id, payload.message.strip(), response)
+                return response
         except HTTPException:
             _restore_checkpoint(execution)
             _mark_turn(record, TURN_FAILED)
@@ -1735,6 +1882,7 @@ def delete_thread(
 async def upload_document(
     file: UploadFile = File(...),
     x_session_token: Optional[str] = Header(default=None, alias="X-Session-Token"),
+    x_tracing_enabled: Optional[str] = Header(default=None, alias="X-Tracing-Enabled"),
 ):
     """
     Accepts a document for the current session's hybrid RAG store and indexes it
@@ -1758,28 +1906,56 @@ async def upload_document(
     _restore_documents_for_session(session_id, session_entry)
     doc_index = get_session_document_index(session_id)
 
+    trace_enabled = _header_enabled(x_tracing_enabled)
     try:
-        content = await file.read(MAX_FILE_SIZE_BYTES + 1)
-        if len(content) > MAX_FILE_SIZE_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=f"File exceeds the {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB upload limit.",
+        with tracing.root(
+            "tisw.upload",
+            enabled=trace_enabled,
+            inputs={
+                "filename": tracing.preview(safe_filename, limit=120),
+                "extension": ext,
+                "content_type": file.content_type or "",
+            },
+            tags=["TISW", "upload"],
+            metadata={
+                "application": "TISW",
+                "environment": "local",
+                "stage": "upload",
+                "session_id_hash": _safe_trace_id(session_id),
+            },
+            project_name=_langsmith_project(),
+        ) as trace_run:
+            content = await file.read(MAX_FILE_SIZE_BYTES + 1)
+            if len(content) > MAX_FILE_SIZE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File exceeds the {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB upload limit.",
+                )
+            meta = await asyncio.to_thread(doc_index.stage_document, safe_filename, content)
+            tracing.add_outputs(trace_run, {
+                "doc_id": meta.doc_id,
+                "chunk_count": meta.chunk_count,
+                "size_kb": meta.size_kb,
+                "index_status": meta.status,
+            })
+            # The embedding pass keeps the switch this upload was given; a worker
+            # thread starts with a fresh context and cannot inherit the request's.
+            _index_document_async(
+                session_id, meta.doc_id, session_entry.client_id, content, trace_enabled
             )
-        meta = await asyncio.to_thread(doc_index.stage_document, safe_filename, content)
-        _index_document_async(session_id, meta.doc_id, session_entry.client_id, content)
-        return UploadDocumentResponse(
-            status="success",
-            doc_id=meta.doc_id,
-            filename=meta.filename,
-            file_type=meta.file_type,
-            size_kb=meta.size_kb,
-            chunk_count=meta.chunk_count,
-            index_status=meta.status,
-            message=(
-                f"Document '{meta.filename}' ({meta.size_kb} KB, {meta.chunk_count} chunks) "
-                "is indexing in the background."
-            ),
-        )
+            return UploadDocumentResponse(
+                status="success",
+                doc_id=meta.doc_id,
+                filename=meta.filename,
+                file_type=meta.file_type,
+                size_kb=meta.size_kb,
+                chunk_count=meta.chunk_count,
+                index_status=meta.status,
+                message=(
+                    f"Document '{meta.filename}' ({meta.size_kb} KB, {meta.chunk_count} chunks) "
+                    "is indexing in the background."
+                ),
+            )
     except ValueError as val_err:
         raise HTTPException(status_code=400, detail=str(val_err))
     except HTTPException:

@@ -25,12 +25,12 @@ from rag_engine import (
 
 def run_tests():
     print("=== 1. Testing Configuration Parameters ===")
-    assert VECTOR_WEIGHT == 0.5, f"Expected VECTOR_WEIGHT 0.5, got {VECTOR_WEIGHT}"
-    assert BM25_WEIGHT == 0.5, f"Expected BM25_WEIGHT 0.5, got {BM25_WEIGHT}"
+    assert VECTOR_WEIGHT == 0.3, f"Expected VECTOR_WEIGHT 0.3, got {VECTOR_WEIGHT}"
+    assert BM25_WEIGHT == 0.7, f"Expected BM25_WEIGHT 0.7, got {BM25_WEIGHT}"
     assert VECTOR_CANDIDATES == 10, f"Expected VECTOR_CANDIDATES 10, got {VECTOR_CANDIDATES}"
     assert BM25_CANDIDATES == 10, f"Expected BM25_CANDIDATES 10, got {BM25_CANDIDATES}"
     assert FINAL_TOP_K == 6, f"Expected FINAL_TOP_K 6, got {FINAL_TOP_K}"
-    print("✓ Configuration weights (0.5/0.5), candidates (10/10), and top-k (6) verified.")
+    print("✓ Configuration weights (0.3/0.7), candidates (10/10), and top-k (6) verified.")
 
     print("\n=== 2. Testing Text Extraction & Indexing ===")
     # 2a. Plain text document
@@ -65,7 +65,7 @@ def run_tests():
     assert docx_meta.chunk_count > 0
     print(f"✓ Added DOCX document: {docx_meta.filename} with {docx_meta.chunk_count} chunk(s).")
 
-    print("\n=== 3. Testing Hybrid Search (Dense Vector + BM25 + 50/50 RRF) ===")
+    print("\n=== 3. Testing Hybrid Search (Dense Vector + BM25 + 30/70 RRF) ===")
     # Query matching quantum text
     query_1 = "What is superposition and entanglement in quantum mechanics?"
     results_1 = index.hybrid_search(query_1, final_top_k=6)

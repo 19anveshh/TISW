@@ -343,8 +343,10 @@ export const MAX_UPLOAD_SIZE_BYTES = 30 * 1024 * 1024;
  *
  * @param {File} file
  * @param {string|null} [sessionToken]
+ * @param {boolean} [tracingEnabled] Sends the Trace switch for multipart uploads,
+ *   which carry no JSON body.
  */
-export async function uploadFile(file, sessionToken) {
+export async function uploadFile(file, sessionToken, tracingEnabled = false) {
   if (!file) throw new Error("Choose a file to upload.");
   const ext = "." + (file.name.split(".").pop() || "").toLowerCase();
   if (!SUPPORTED_EXTENSIONS.includes(ext)) {
@@ -358,6 +360,7 @@ export async function uploadFile(file, sessionToken) {
   formData.append("file", file);
 
   const headers = sessionHeaders(sessionToken);
+  if (tracingEnabled) headers["X-Tracing-Enabled"] = "true";
 
   const res = await fetchReachable(`${API_BASE}/api/upload`, {
     method: "POST",

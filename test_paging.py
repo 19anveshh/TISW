@@ -204,7 +204,7 @@ def run_stream_payload_test():
 
     with patch.object(server, "is_offline_mode", return_value=False), \
          patch.object(server, "tutor_stream_app", graph), \
-         patch.object(server, "_request_tracing_context", return_value=__import__("contextlib").nullcontext()):
+         patch.object(server, "_turn_trace_context", return_value=__import__("contextlib").nullcontext()):
         events = asyncio.run(collect_live())
     assert events[-1][0] == "done"
     assert events[-1][1]["paging"]["title"] == TISW_BEATS[0]

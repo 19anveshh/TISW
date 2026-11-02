@@ -78,6 +78,9 @@ export default function App() {
   const [ragEnabled, setRagEnabled]     = useState(false);
   const [documents, setDocuments]       = useState([]);
 
+  // One switch governs every trace a turn can produce: chat, upload, indexing.
+  const tracingActive = Boolean(tracingPreference && runtimeStatus.tracingAvailable && !runtimeStatus.offline);
+
   // --- UI state ---
   const [sidebarOpen, setSidebarOpen]   = useState(false);
   const [toast, setToast]               = useState(null);
@@ -356,7 +359,7 @@ export default function App() {
         threadId: requestThreadId,
         turnId,
         requestId,
-        tracingEnabled: Boolean(tracingPreference && runtimeStatus.tracingAvailable && !runtimeStatus.offline),
+        tracingEnabled: tracingActive,
         hasSessionToken: Boolean(sessionToken),
       });
     }
@@ -413,7 +416,7 @@ export default function App() {
         turnId,
         sessionToken,       // opaque server-issued token
         ragEnabled,
-        tracingEnabled: Boolean(tracingPreference && runtimeStatus.tracingAvailable && !runtimeStatus.offline),
+        tracingEnabled: tracingActive,
         signal: controller.signal,
         onStart: (data) => setActiveMode(data.mode === 'tisw' ? 'tisw' : 'normal'),
         onDelta: (text) => pacer.push(text),
@@ -472,7 +475,7 @@ export default function App() {
         setIsLoading(false);
       }
     }
-  }, [prompt, threadId, isLoading, triggerToast, sessionToken, ragEnabled, tracingPreference, runtimeStatus, updateSessionToken, establishServerSession, flushPacing]);
+  }, [prompt, threadId, isLoading, triggerToast, sessionToken, ragEnabled, tracingActive, updateSessionToken, establishServerSession, flushPacing]);
 
   // =========================================================================
   // NEW CHAT / RESET SESSION
@@ -635,6 +638,7 @@ export default function App() {
           onToast={triggerToast}
           documents={documents}
           setDocuments={setDocuments}
+          tracingActive={tracingActive}
         />
 
         {/* Session History */}
@@ -945,6 +949,7 @@ export default function App() {
                 onUploadError={(err) => triggerToast(err, 'error')}
                 disabled={isLoading}
                 sessionToken={sessionToken}
+                tracingActive={tracingActive}
               />
             </div>
           )}
