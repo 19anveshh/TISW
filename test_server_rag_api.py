@@ -51,7 +51,9 @@ class FakeTutorGraph:
 @patch.object(server, "is_offline_mode", return_value=False)
 def run_api_tests(_offline_guard):
     # Session issuance only stores the key; no live Groq request is made here.
-    os.environ.setdefault("GROQ_API_KEY", "test-key-for-session-tests")
+    # Assign rather than setdefault: a blank GROQ_API_KEY= line in a local .env
+    # otherwise counts as "already set" and the suite fails before it starts.
+    os.environ["GROQ_API_KEY"] = "test-key-for-session-tests"
     print("=== 1. Testing Health Endpoint ===")
     res = client.get("/api/health")
     assert res.status_code == 200
