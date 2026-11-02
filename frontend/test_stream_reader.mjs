@@ -77,6 +77,7 @@ async function run() {
   globalThis.fetch = async () => ({
     ok: false,
     status: 422,
+    headers: { get: (name) => (name === 'content-type' ? 'application/json' : null) },
     json: async () => ({ detail: 'The request is invalid.' }),
   });
   try {
