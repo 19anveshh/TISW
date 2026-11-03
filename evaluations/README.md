@@ -79,6 +79,13 @@ uv run python -m evaluations.runner --live --judge \
 
 # Critical mode failures return non-zero; compare against an earlier JSON run
 uv run python -m evaluations.runner --live --baseline evaluation_results/<run>.json --fail-on-regression
+
+# Publish the fixed cases to an authenticated LangSmith workspace
+LANGSMITH_API_KEY=... uv run python -m evaluations.langsmith_online --publish
+
+# Publish a bounded sample and run its hosted fact-coverage experiment
+LANGSMITH_API_KEY=... GROQ_API_KEY=... uv run python -m evaluations.langsmith_online \
+  --publish --run --limit 10 --max-concurrency 1
 ```
 
 Each run writes one JSON result and one Markdown report. Reports contain the
@@ -86,6 +93,12 @@ model, dataset/rubric/prompt hashes, timestamp, measured/not-run/blocked
 statuses, outputs, traces, latency, provider usage when available, failures,
 and baseline comparison. API keys are scrubbed and are never read into report
 metadata.
+
+`evaluations.langsmith_online` is the hosted integration. It uses the official
+LangSmith SDK, creates one versioned dataset per dataset name, inserts only
+missing stable case IDs, and uploads bounded experiment results. It requires
+`LANGSMITH_API_KEY`; `--run` additionally requires `GROQ_API_KEY`. Neither key
+is written to examples, metadata, reports, or logs.
 
 Provider 429s, timeouts, missing responses, invalid judge JSON, and budget
 exhaustion are recorded as `ERROR` or `NOT_RUN`; they cannot become a quality

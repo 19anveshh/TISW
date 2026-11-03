@@ -24,9 +24,10 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from server import app
 import server
+import rag_engine
 from rag_engine import get_session_document_index
 
 client = TestClient(app)
@@ -46,6 +47,36 @@ class FakeTutorGraph:
         return {
             "messages": [AIMessage(content="Mocked tutor response")],
             "active_mode": payload.get("active_mode", "normal"),
+        }
+
+
+class LargeContextThenSuccessGraph(FakeTutorGraph):
+    """Simulates Groq rejecting full context once, then accepting excerpts."""
+
+    def __init__(self):
+        super().__init__()
+        self.attempts = 0
+
+    def invoke(self, payload, config):
+        self.attempts += 1
+        if self.attempts == 1:
+            raise RuntimeError("413 request too large: tokens per minute")
+        return super().invoke(payload, config)
+
+    async def astream_events(self, payload, config=None, version="v2"):
+        self.attempts += 1
+        if self.attempts == 1:
+            raise RuntimeError("413 request too large: tokens per minute")
+        yield {
+            "event": "on_chat_model_stream",
+            "name": "ChatGroq",
+            "metadata": {"langgraph_node": "tutor"},
+            "data": {"chunk": AIMessageChunk(content="Mocked streamed response")},
+        }
+        yield {
+            "event": "on_chain_end",
+            "name": "LangGraph",
+            "data": {"output": {"messages": [AIMessage(content="Mocked streamed response")]}},
         }
 
 @patch.object(server, "is_offline_mode", return_value=False)
@@ -189,9 +220,91 @@ def run_api_tests(_offline_guard):
         assert res_chat.status_code == 200, res_chat.text
         chat_data = res_chat.json()
         assert chat_data["rag_used"] is True
-        assert 0 < len(chat_data["sources"]) <= 6
+        assert len(chat_data["sources"]) == 1
         assert all(source["filename"] == "operating_systems.txt" for source in chat_data["sources"])
+        assert chat_data["sources"][0]["chunk_id"].endswith("_full")
         assert "operating_systems.txt" in fake_graph.last_payload["rag_context"]
+        assert "COMPLETE document" in fake_graph.last_payload["rag_context"]
+        assert txt_content.decode().strip() in fake_graph.last_payload["rag_context"]
+
+    fallback_graph = FakeTutorGraph()
+    with patch.object(rag_engine, "FULL_DOC_CHAR_BUDGET", 1):
+        with patch.object(server, "create_tutor_graph", return_value=fallback_graph):
+            res_fallback = client.post(
+                "/api/chat",
+                json={"message": "What causes a page fault?", "rag_enabled": True, "mode": "normal"},
+                headers={"X-Session-Token": token_a},
+            )
+    assert res_fallback.status_code == 200, res_fallback.text
+    fallback_data = res_fallback.json()
+    assert fallback_data["rag_used"] is True
+    assert 0 < len(fallback_data["sources"]) <= 6
+    assert all(not source["chunk_id"].endswith("_full") for source in fallback_data["sources"])
+    assert "COMPLETE document" not in fallback_graph.last_payload["rag_context"]
+    assert "EXCERPT" in fallback_graph.last_payload["rag_context"]
+    print("✓ Full-document injection is used when eligible and falls back to top-k when over budget")
+
+    retry_graph = LargeContextThenSuccessGraph()
+    with patch.object(server, "create_tutor_graph", return_value=retry_graph):
+        res_retry = client.post(
+            "/api/chat",
+            json={
+                "message": "What causes a page fault?",
+                "rag_enabled": True,
+                "thread_id": "large-context-retry",
+                "turn_id": "large-context-retry",
+            },
+            headers={"X-Session-Token": token_a},
+        )
+    assert res_retry.status_code == 200, res_retry.text
+    assert retry_graph.attempts == 2
+    assert "COMPLETE document" not in retry_graph.last_payload["rag_context"]
+    assert all(not source["chunk_id"].endswith("_full") for source in res_retry.json()["sources"])
+
+    analysis_graph = LargeContextThenSuccessGraph()
+    with patch.object(server, "create_tutor_graph", return_value=analysis_graph):
+        res_analysis = client.post(
+            "/api/chat",
+            json={
+                "message": "How many modules are in the document?",
+                "rag_enabled": True,
+                "thread_id": "large-context-analysis",
+                "turn_id": "large-context-analysis",
+            },
+            headers={"X-Session-Token": token_a},
+        )
+    assert res_analysis.status_code == 200, res_analysis.text
+    assert analysis_graph.attempts == 2
+    assert "DOCUMENT-WIDE STRUCTURE" in analysis_graph.last_payload["rag_context"]
+    assert "EXCERPT" not in analysis_graph.last_payload["rag_context"]
+    assert res_analysis.json()["sources"][0]["chunk_id"].endswith("_analysis")
+
+    analysis_meta = type("Meta", (), {"filename": "modules.txt", "doc_id": "analysis", "chunk_count": 4})()
+    analysis_context, analysis_sources = server._build_document_analysis_context([
+        (analysis_meta, "MODULE 1: Probability\nQuestion 1: Define probability.\nMODULE 2: Statistics")
+    ])
+    assert "MODULE 1: Probability" in analysis_context
+    assert "MODULE 2: Statistics" in analysis_context
+    assert analysis_sources[0].chunk_id == "analysis_analysis"
+
+    stream_retry_graph = LargeContextThenSuccessGraph()
+    with patch.object(server, "create_tutor_streaming_graph", return_value=stream_retry_graph):
+        res_stream_retry = client.post(
+            "/api/chat/stream",
+            json={
+                "message": "What causes a page fault?",
+                "rag_enabled": True,
+                "thread_id": "large-context-stream-retry",
+                "turn_id": "large-context-stream-retry",
+            },
+            headers={"X-Session-Token": token_a},
+        )
+    assert res_stream_retry.status_code == 200, res_stream_retry.text
+    assert stream_retry_graph.attempts == 2
+    assert 'event: done' in res_stream_retry.text
+    assert '"chunk_id":"' in res_stream_retry.text
+    assert '_full' not in res_stream_retry.text
+    print("✓ Oversized full-document requests retry through hybrid retrieval for sync and streaming chat")
 
     fake_off_graph = FakeTutorGraph()
     with patch.object(server, "tutor_app", fake_off_graph):

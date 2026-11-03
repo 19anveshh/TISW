@@ -145,6 +145,50 @@ class RagFeatureTests(unittest.TestCase):
         finally:
             prune_session_index(session_id)
 
+    def test_staging_retains_full_text_only_within_budget(self):
+        session_id = "offline-rag-full-text-test"
+        prune_session_index(session_id)
+        try:
+            index = SessionDocumentIndex(session_id)
+            with patch.object(
+                rag_engine,
+                "extract_text_from_file",
+                return_value=[("First extracted section.", 1), ("Second extracted section.", 2)],
+            ):
+                meta = index.stage_document("notes.txt", b"source bytes")
+            self.assertEqual(meta.full_text, "First extracted section.\n\nSecond extracted section.")
+
+            with patch.object(rag_engine, "FULL_DOC_CHAR_BUDGET", 5):
+                oversized = index.stage_document("oversized.txt", b"source bytes 2")
+            self.assertEqual(oversized.full_text, "")
+        finally:
+            prune_session_index(session_id)
+
+    def test_ready_full_documents_requires_all_ready_documents_and_budget(self):
+        session_id = "offline-rag-full-document-selection-test"
+        prune_session_index(session_id)
+        try:
+            with patch.object(rag_engine, "get_embedding_model", return_value=FakeEmbedding()):
+                index = SessionDocumentIndex(session_id)
+                first = index.add_document("first.txt", b"First document text.")
+                second = index.add_document("second.txt", b"Second document text.")
+
+            ready = index.ready_full_documents()
+            self.assertEqual(ready, [(first, first.full_text), (second, second.full_text)])
+
+            second.full_text = ""
+            self.assertIsNone(index.ready_full_documents())
+
+            second.full_text = "Second document text."
+            with patch.object(rag_engine, "FULL_DOC_CHAR_BUDGET", 5):
+                self.assertIsNone(index.ready_full_documents())
+
+            first.status = rag_engine.INDEX_STATUS_INDEXING
+            second.status = rag_engine.INDEX_STATUS_INDEXING
+            self.assertIsNone(index.ready_full_documents())
+        finally:
+            prune_session_index(session_id)
+
     def test_hybrid_search_ignores_irrelevant_results(self):
         session_id = "offline-rag-relevance-test"
         prune_session_index(session_id)

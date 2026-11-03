@@ -278,6 +278,7 @@ def run_turn_tree() -> None:
         frames = []
         with patch.object(server, "is_offline_mode", return_value=False), \
              patch.object(server, "create_tutor_streaming_graph", return_value=graph), \
+             patch.object(rag_engine, "FULL_DOC_CHAR_BUDGET", 1), \
              traced_langsmith(recorder):
             async for frame in server._stream_chat_events(payload, token, "span-client"):
                 frames.append(frame)
@@ -323,6 +324,7 @@ def run_turn_tree() -> None:
     sync_graph = TutorStreamGraph(answer="sync grounded answer")
     with patch.object(server, "is_offline_mode", return_value=False), \
          patch.object(server, "create_tutor_graph", return_value=sync_graph), \
+         patch.object(rag_engine, "FULL_DOC_CHAR_BUDGET", 1), \
          traced_langsmith(recorder):
         sync = client.post(
             "/api/chat",

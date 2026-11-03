@@ -580,6 +580,14 @@ _VERIFY_PROBE = "Reply with exactly: OK"
 def _classify_groq_error(error_msg: str) -> HTTPException:
     """Map Groq error strings to user-friendly HTTP errors without leaking secrets."""
     em = error_msg.lower()
+    if "413" in em or "request too large" in em or "tokens per minute" in em:
+        return HTTPException(
+            status_code=413,
+            detail=(
+                "The document context is too large for the current Groq limit. "
+                "The request should retry with relevant excerpts."
+            ),
+        )
     if "401" in em or "authentication" in em or "invalid api key" in em or "unauthorized" in em:
         return HTTPException(status_code=401, detail="Invalid Groq API key. Please check and try again.")
     if "429" in em or "rate_limit" in em or "rate limit" in em:
@@ -589,6 +597,25 @@ def _classify_groq_error(error_msg: str) -> HTTPException:
     if "503" in em or "unavailable" in em:
         return HTTPException(status_code=503, detail="Groq service temporarily unavailable.")
     return HTTPException(status_code=502, detail="Groq API error. Please try again.")
+
+
+def _is_request_too_large(error: BaseException) -> bool:
+    """Recognize provider request-size failures without depending on an SDK class."""
+    message = str(error).lower()
+    return (
+        "413" in message
+        or "request too large" in message
+        or "tokens per minute" in message
+    )
+
+
+def _is_whole_document_query(user_text: str) -> bool:
+    """Identify questions whose answer requires facts aggregated across a document."""
+    lowered = (user_text or "").lower()
+    return (
+        any(term in lowered for term in ("module", "modules", "question", "questions"))
+        and any(term in lowered for term in ("how many", "what are", "list", "count", "all", "total"))
+    ) or any(term in lowered for term in ("summarize the document", "summarise the document", "overview of the document"))
 
 
 def enrich_message(user_text: str, mode: Optional[str] = None) -> str:
@@ -1103,11 +1130,86 @@ def _build_rag_context(retrieved_chunks: List[Any]) -> Tuple[str, List[SourceIte
     return "\n\n".join(context_blocks), sources
 
 
+@tracing.traced(
+    "rag.full_document_context",
+    inputs=lambda args, kwargs: {
+        "documents": len(tracing.arg_at(args, kwargs, 0, "documents", []) or [])
+    },
+    outputs=lambda built: {
+        "context_characters": len(built[0]),
+        "citations": len(built[1]),
+        "strategy": "full_document",
+    },
+)
+def _build_full_document_context(documents) -> Tuple[str, List[SourceItem]]:
+    context_blocks, sources = [], []
+    for meta, text in documents:
+        context_blocks.append(
+            f"--- FULL DOCUMENT: {meta.filename} ---\n"
+            f"[Source: {meta.filename} | Document ID: {meta.doc_id} | The COMPLETE document follows — {meta.chunk_count} indexed sections]\n"
+            f"{text}"
+        )
+        snippet = text[:220].strip() + ("…" if len(text) > 220 else "")
+        sources.append(SourceItem(
+            filename=meta.filename,
+            page_number=None,
+            chunk_id=f"{meta.doc_id}_full",
+            snippet=snippet,
+        ))
+    return "\n\n".join(context_blocks), sources
+
+
+@tracing.traced(
+    "rag.document_analysis_context",
+    inputs=lambda args, kwargs: {
+        "documents": len(tracing.arg_at(args, kwargs, 0, "documents", []) or [])
+    },
+    outputs=lambda built: {
+        "context_characters": len(built[0]),
+        "citations": len(built[1]),
+        "strategy": "document_analysis",
+    },
+)
+def _build_document_analysis_context(documents) -> Tuple[str, List[SourceItem]]:
+    """Keep document-wide structure small enough for providers with low TPM limits."""
+    context_blocks: List[str] = []
+    sources: List[SourceItem] = []
+    for meta, text in documents:
+        lines = [" ".join(line.split()) for line in text.splitlines() if line.strip()]
+        module_lines: List[str] = []
+        question_markers = 0
+        for index, line in enumerate(lines):
+            if re.search(r"\bmodule\s*\d+\b", line, re.IGNORECASE):
+                related = [line]
+                related.extend(lines[index + 1:index + 3])
+                module_lines.append(" — ".join(related))
+            if re.match(r"^(?:question\s*)?\d{1,3}\s*[.)\-:]\s+", line, re.IGNORECASE):
+                question_markers += 1
+        unique_modules = list(dict.fromkeys(module_lines))
+        module_summary = "\n".join(f"- {line}" for line in unique_modules) or "- No module headings detected"
+        context_blocks.append(
+            f"--- DOCUMENT-WIDE STRUCTURE: {meta.filename} ---\n"
+            f"[Source: {meta.filename} | Document ID: {meta.doc_id} | Complete-document structural analysis]\n"
+            f"Module headings found:\n{module_summary}\n"
+            f"Numbered question markers detected: {question_markers}"
+        )
+        snippet = ("; ".join(unique_modules) or f"{question_markers} numbered question markers detected")[:220]
+        sources.append(SourceItem(
+            filename=meta.filename,
+            page_number=None,
+            chunk_id=f"{meta.doc_id}_analysis",
+            snippet=snippet,
+        ))
+    return "\n\n".join(context_blocks), sources
+
+
 def _prepare_chat_execution(
     payload: ChatRequest,
     session_token: Optional[str],
     *,
     streaming: bool,
+    force_hybrid_retrieval: bool = False,
+    force_document_analysis: bool = False,
     thread_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     request_id: Optional[str] = None,
@@ -1142,6 +1244,8 @@ def _prepare_chat_execution(
     rag_used = False
     sources: List[SourceItem] = []
     rag_context_str: Optional[str] = None
+    full_docs = None
+    analysis_docs = None
     snapshot = snapshot_values or {}
     pre_turn_paging = paging_payload({**snapshot, "active_mode": current_mode})
     paging_control = is_paging_control(
@@ -1200,22 +1304,34 @@ def _prepare_chat_execution(
                 "request_id": request_id,
                 "snapshot_values": snapshot_values,
                 "early_response": early,
+                "full_document_context": False,
                 "trace_requested": bool(payload.tracing_enabled),
             }
 
         # An empty session mid-walkthrough must not be interrupted by an upload
         # warning, so the part is delivered ungrounded instead.
         if doc_index.documents:
-            retrieval_query = (
-                paging_topic if paging_control
-                else _build_retrieval_query(graph, config_base, user_text)
-            )
-            retrieved_chunks = doc_index.hybrid_search(query=retrieval_query, final_top_k=FINAL_TOP_K)
-            if retrieved_chunks:
+            full_docs = None if force_hybrid_retrieval else doc_index.ready_full_documents()
+            if force_document_analysis:
+                analysis_docs = doc_index.ready_full_documents()
+                full_docs = None
+                if analysis_docs is not None:
+                    rag_used = True
+                    rag_context_str, sources = _build_document_analysis_context(analysis_docs)
+            if full_docs is not None:
                 rag_used = True
-                rag_context_str, sources = _build_rag_context(retrieved_chunks)
-            else:
-                rag_context_str = "[No relevant excerpts were found in the uploaded documents for this question.]"
+                rag_context_str, sources = _build_full_document_context(full_docs)
+            elif analysis_docs is None:
+                retrieval_query = (
+                    paging_topic if paging_control
+                    else _build_retrieval_query(graph, config_base, user_text)
+                )
+                retrieved_chunks = doc_index.hybrid_search(query=retrieval_query, final_top_k=FINAL_TOP_K)
+                if retrieved_chunks:
+                    rag_used = True
+                    rag_context_str, sources = _build_rag_context(retrieved_chunks)
+                else:
+                    rag_context_str = "[No relevant excerpts were found in the uploaded documents for this question.]"
             invoke_payload = {"messages": [HumanMessage(content=enriched)], "rag_context": rag_context_str}
 
     metadata = {
@@ -1245,6 +1361,8 @@ def _prepare_chat_execution(
         "request_id": request_id,
         "snapshot_values": snapshot_values,
         "early_response": None,
+        "full_document_context": full_docs is not None,
+        "document_analysis_context": analysis_docs is not None,
         "trace_requested": bool(payload.tracing_enabled),
     }
 
@@ -1443,6 +1561,7 @@ async def _stream_chat_events_locked(
     accumulated: list[str] = []
     final_response = ""
     final_state: Optional[dict[str, Any]] = None
+    retried_large_context = False
     try:
         with _turn_trace_context(
             bool(payload.tracing_enabled),
@@ -1509,33 +1628,64 @@ async def _stream_chat_events_locked(
                 yield _sse_event("done", early_payload)
                 return
 
-            async for event in execution["graph"].astream_events(
-                execution["invoke_payload"],
-                config=execution["config"],
-                version="v2",
-            ):
-                text = _extract_tutor_delta(event)
-                if text:
-                    if not accumulated:
-                        _stream_diagnostic(
-                            "first_delta",
-                            request_id=execution["request_id"],
-                            turn_id=turn_id,
+            while True:
+                try:
+                    async for event in execution["graph"].astream_events(
+                        execution["invoke_payload"],
+                        config=execution["config"],
+                        version="v2",
+                    ):
+                        text = _extract_tutor_delta(event)
+                        if text:
+                            if not accumulated:
+                                _stream_diagnostic(
+                                    "first_delta",
+                                    request_id=execution["request_id"],
+                                    turn_id=turn_id,
+                                    thread_id=thread_id,
+                                    response=text,
+                                    source="live_generation",
+                                )
+                            accumulated.append(text)
+                            emitted_text = True
+                            yield _sse_event("delta", {"text": text})
+                        elif (
+                            event.get("event") == "on_chain_end"
+                            and event.get("name") in {"LangGraph", execution["config"].get("run_name")}
+                        ):
+                            output = (event.get("data") or {}).get("output")
+                            final_response = _final_response_from_output(output)
+                            if isinstance(output, dict):
+                                final_state = output
+                    break
+                except Exception as exc:
+                    if (
+                        not retried_large_context
+                        and not emitted_text
+                        and execution.get("full_document_context")
+                        and _is_request_too_large(exc)
+                    ):
+                        retried_large_context = True
+                        _restore_checkpoint(execution)
+                        execution = await asyncio.to_thread(
+                            _prepare_chat_execution,
+                            payload,
+                            session_token,
+                            streaming=True,
+                            force_hybrid_retrieval=not _is_whole_document_query(payload.message),
+                            force_document_analysis=_is_whole_document_query(payload.message),
                             thread_id=thread_id,
-                            response=text,
-                            source="live_generation",
+                            turn_id=turn_id,
+                            request_id=request_id,
+                            client_id=client_id,
                         )
-                    accumulated.append(text)
-                    emitted_text = True
-                    yield _sse_event("delta", {"text": text})
-                elif (
-                    event.get("event") == "on_chain_end"
-                    and event.get("name") in {"LangGraph", execution["config"].get("run_name")}
-                ):
-                    output = (event.get("data") or {}).get("output")
-                    final_response = _final_response_from_output(output)
-                    if isinstance(output, dict):
-                        final_state = output
+                        _annotate_turn(trace_run, execution)
+                        emitted_text = False
+                        accumulated.clear()
+                        final_response = ""
+                        final_state = None
+                        continue
+                    raise
 
             if not final_response:
                 final_response = "".join(accumulated)
@@ -1594,7 +1744,8 @@ async def _stream_chat_events_locked(
         _restore_checkpoint(execution)
         _mark_turn(record, TURN_FAILED)
         _log_stream_exception(exc, execution=execution)
-        yield _sse_event("error", {"message": "Generation failed. Please try again."})
+        classified = _classify_groq_error(str(exc))
+        yield _sse_event("error", {"message": str(classified.detail), "status": classified.status_code})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1767,11 +1918,34 @@ async def chat_endpoint(
                         "rag_used": execution["rag_used"],
                     })
                 else:
-                    result = await asyncio.to_thread(
-                        execution["graph"].invoke,
-                        execution["invoke_payload"],
-                        config=execution["config"],
-                    )
+                    try:
+                        result = await asyncio.to_thread(
+                            execution["graph"].invoke,
+                            execution["invoke_payload"],
+                            config=execution["config"],
+                        )
+                    except Exception as exc:
+                        if not execution.get("full_document_context") or not _is_request_too_large(exc):
+                            raise
+                        _restore_checkpoint(execution)
+                        execution = await asyncio.to_thread(
+                            _prepare_chat_execution,
+                            payload,
+                            x_session_token,
+                            streaming=False,
+                            force_hybrid_retrieval=not _is_whole_document_query(payload.message),
+                            force_document_analysis=_is_whole_document_query(payload.message),
+                            thread_id=thread_id,
+                            turn_id=turn_id,
+                            request_id=request_id,
+                            client_id=client_id,
+                        )
+                        _annotate_turn(trace_run, execution)
+                        result = await asyncio.to_thread(
+                            execution["graph"].invoke,
+                            execution["invoke_payload"],
+                            config=execution["config"],
+                        )
                     msgs = result.get("messages", [])
                     if not msgs:
                         raise HTTPException(status_code=500, detail="Empty response from LangGraph.")
@@ -1957,7 +2131,8 @@ async def upload_document(
                 ),
             )
     except ValueError as val_err:
-        raise HTTPException(status_code=400, detail=str(val_err))
+        status_code = 409 if "already uploaded" in str(val_err).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(val_err))
     except HTTPException:
         raise
     except Exception as exc:

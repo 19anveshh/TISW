@@ -92,6 +92,7 @@ VECTOR_WEIGHT = 0.3                                             # RRF vector wei
 BM25_WEIGHT = 0.7                                               # RRF BM25 weight
 RRF_K = _env_int("RAG_RRF_K", 60)                               # RRF smoothing constant
 FINAL_TOP_K = _env_int("RAG_FINAL_TOP_K", 6)                    # Final chunks passed to the LLM
+FULL_DOC_CHAR_BUDGET = _env_int("RAG_FULL_DOC_CHAR_BUDGET", 100000)  # full-doc context cap
 MAX_FILE_SIZE_BYTES = _env_int("RAG_MAX_FILE_SIZE_BYTES", 30 * 1024 * 1024)  # 30 MB
 MAX_FILES_PER_SESSION = _env_int("RAG_MAX_FILES_PER_SESSION", 10)             # Max documents
 EMBED_BATCH_SIZE = _env_int("RAG_EMBED_BATCH_SIZE", 8)                        # Chunks per ONNX pass
@@ -142,6 +143,7 @@ class DocumentMetadata:
     uploaded_at: float
     status: str = INDEX_STATUS_READY
     content_hash: str = ""
+    full_text: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -537,6 +539,9 @@ class SessionDocumentIndex:
             doc_id = doc_id or str(uuid.uuid4())[:8]
             sections = extract_text_from_file(filename, file_bytes)
             new_chunks = chunk_document(doc_id, filename, sections)
+            full_text = "\n\n".join(text for text, _page in sections if text and text.strip())
+            if len(full_text) > FULL_DOC_CHAR_BUDGET:
+                full_text = ""
 
             if not new_chunks:
                 raise ValueError(f"No chunks could be produced from '{filename}'.")
@@ -551,6 +556,7 @@ class SessionDocumentIndex:
                 uploaded_at=time.time(),
                 status=INDEX_STATUS_INDEXING,
                 content_hash=content_hash,
+                full_text=full_text,
             )
             self.documents[doc_id] = meta
             return meta
@@ -671,6 +677,18 @@ class SessionDocumentIndex:
         """Counts documents whose chunks are actually searchable right now."""
         with self.lock:
             return sum(1 for doc in self.documents.values() if doc.status == INDEX_STATUS_READY)
+
+    def ready_full_documents(self) -> Optional[List[Tuple[DocumentMetadata, str]]]:
+        """All ready documents when every one retained its full text within budget.
+        Returns None when full-document injection must not be used.
+        """
+        with self.lock:
+            ready = [d for d in self.documents.values() if d.status == INDEX_STATUS_READY]
+        if not ready or any(not d.full_text for d in ready):
+            return None
+        if sum(len(d.full_text) for d in ready) > FULL_DOC_CHAR_BUDGET:
+            return None
+        return [(d, d.full_text) for d in ready]
 
     def status_counts(self) -> Dict[str, int]:
         """Per-lifecycle counts, so 'indexing' is never confused with 'failed'."""

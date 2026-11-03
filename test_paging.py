@@ -280,6 +280,9 @@ def run_rag_continuation_test():
         def status_counts(self):
             return {"indexing": 0, "ready": len(self.documents), "failed": 0}
 
+        def ready_full_documents(self):
+            return None
+
         def hybrid_search(self, query, final_top_k):
             self.queries.append(query)
             return [Chunk()]

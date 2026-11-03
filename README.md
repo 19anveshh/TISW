@@ -280,6 +280,15 @@ one and does not call the LLM pretending that retrieval occurred.
   Ranks start at 1, missing ranks contribute nothing, duplicates collapse by
   stable chunk ID, and the top 6 fused chunks reach the Groq prompt.
 
+  When all ready documents in a session retain their complete extracted text
+  and fit within `RAG_FULL_DOC_CHAR_BUDGET` characters (default `100000`), TISW
+  sends the full documents to the tutor for whole-document questions. Otherwise
+  it uses the normal top-6 hybrid retrieval path. If Groq rejects a full-document
+  request because of an account token limit, TISW retries that turn with the
+  same hybrid excerpts instead of failing the chat. Whole-document structure
+  questions such as module lists use a compact document-wide analysis on that
+  retry so headings can still be counted without exceeding provider limits.
+
 ### Citations
 
 The backend returns the exact filename, optional PDF page number, stable chunk

@@ -139,7 +139,11 @@ export default function CinematicIntro({ onReveal, onComplete }) {
       ));
       const targetPositions = getTargetLetterPositions(target, sourceFontSizes);
       const sourceRects = formationRectsRef.current;
-      if (!targetPositions || sourceRects.some((rect) => !rect)) return;
+      if (
+        !targetPositions
+        || sourceRects.length !== LETTER_KEYS.length
+        || sourceRects.some((rect) => !rect)
+      ) return;
 
       setLetterTransforms(targetPositions.map((position, index) => {
         const rect = sourceRects[index];
